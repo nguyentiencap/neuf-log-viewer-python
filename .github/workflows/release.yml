@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller==6.13.0
+
+      - name: Build CLI executable
+        run: |
+          python -m PyInstaller `
+            --noconfirm `
+            --clean `
+            --onefile `
+            --name neuf-log-viewer-cli `
+            --add-data "preset.json;." `
+            neuf_log_viewer_cli.py
+
+      - name: Build API executable
+        run: |
+          python -m PyInstaller `
+            --noconfirm `
+            --clean `
+            --onefile `
+            --name neuf-log-viewer-api `
+            --add-data "preset.json;." `
+            neuf_log_viewer_api.py
+
+      - name: Copy runtime assets
+        run: Copy-Item "USERGUIDE.md" "dist\USERGUIDE.md"
+
+      - name: Create release archive
+        run: |
+          Compress-Archive `
+            -Path dist\neuf-log-viewer-cli.exe, dist\neuf-log-viewer-api.exe, dist\USERGUIDE.md `
+            -DestinationPath neuf-log-viewer-python-${{ github.ref_name }}-windows.zip
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: neuf-log-viewer-python-${{ github.ref_name }}-windows.zip
+

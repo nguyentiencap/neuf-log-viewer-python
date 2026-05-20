@@ -1,0 +1,96 @@
+{
+  "scan_all": {
+    "id": "scan_all",
+    "label": "🔍 Scan components",
+    "description": "Show only logs from scan components",
+    "filters": { "componentInclude": ["%scan%", "%autostore%", "%TransactionJob%", "%Equitrac%", "FunctionAccessControlProvider"] }
+  },
+  "print_all": {
+    "id": "print_all",
+    "label": "🔍 Print components",
+    "description": "Show only logs from Print components",
+    "filters": { "componentInclude": ["%print%", "%autostore%", "%TransactionJob%", "%Equitrac%", "FunctionAccessControlProvider"] }
+  },
+  "event_processing": {
+    "id": "event_processing",
+    "label": "🔍 Event processing components",
+    "description": "Show only logs from event processing components",
+    "filters": {
+      "search": "Received",
+      "contextLines": 5,
+      "strictContext": true
+    }
+  },
+  "exclude_noisy_components": {
+    "id": "exclude_noisy_components",
+    "label": "🚫 Exclude Noisy components",
+    "description": "Exclude all noisy components",
+    "filters": { "componentExclude": [
+      "%Endpoint%", "%Historical%", "Dws%", "%Wiring%", "DwsWatchdog%",
+      "WedpDirectImpl",
+      "EventProcessingManagerFactory",
+      "NotificationsProvider",
+      "CustomAssetProvider",
+      "PersistenceFactory",
+      "ConnectionManager"
+    ] }
+  },
+  "errors_and_warnings": {
+    "id": "errors_and_warnings",
+    "label": "⚠️ Show errors and warnings only",
+    "description": "Filter to ERROR and WARN log levels only",
+    "filters": {
+      "logLevelInclude": [
+        "ERROR",
+        "WARN"
+      ]
+    }
+  },
+  "errors_only": {
+    "id": "errors_only",
+    "label": "🔴 Show errors only",
+    "description": "Filter to ERROR log level only",
+    "filters": {
+      "logLevelInclude": [
+        "ERROR"
+      ]
+    }
+  },
+  "exclude_endpoint_tester": {
+    "id": "exclude_endpoint_tester",
+    "label": "🔌 Exclude Endpoint Tester components",
+    "description": "Exclude all components matching %Endpoint%",
+    "filters": { "componentExclude": ["%Endpoint%"] }
+  },
+  "exclude_historical_data": {
+    "id": "exclude_historical_data",
+    "label": "📜 Exclude Historical data components",
+    "description": "Exclude all components matching %Historical%",
+    "filters": { "componentExclude": ["%Historical%"] }
+  },
+  "exclude_dws": {
+    "id": "exclude_dws",
+    "label": "📜 Exclude DWS components",
+    "description": "Exclude all components matching Dws%",
+    "filters": { "componentExclude": ["Dws%"] }
+  },
+  "exclude_wiring": {
+    "id": "exclude_wiring",
+    "label": "📜 Exclude Wiring components",
+    "description": "Exclude all components matching %Wiring%",
+    "filters": { "componentExclude": ["%Wiring%"] }
+  },
+  "component_not_null": {
+    "id": "component_not_null",
+    "label": "🔍 Show only logs with component",
+    "description": "Show only logs that have a component name",
+    "filters": { "componentExclude": [null] }
+  },
+  "component_null": {
+    "id": "component_null",
+    "label": "🔍 Show only logs without component",
+    "description": "Show only logs that have no component name (empty)",
+    "filters": { "componentInclude": [null] }
+  }
+}
+
