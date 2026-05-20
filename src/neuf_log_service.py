@@ -12,7 +12,7 @@ import sqlite3
 
 from .log_parser import default_log_parser_service
 from .log_file_scanner import LogFileScannerService
-from .database import DatabaseWrapper, DatabaseService
+from .database import DatabaseWrapper, DatabaseService, DB_SCHEMA_VERSION
 from .preset import PresetService
 
 
@@ -27,9 +27,10 @@ class NEUFLogService:
     _sql = None          # not actually needed; Python uses sqlite3 natively
     _db_cache = {}
 
-    def __init__(self, logger=print):
+    def __init__(self, logger=print, sql_logger=None):
         self.parser_service  = default_log_parser_service
         self.logger          = logger
+        self.sql_logger      = sql_logger
         self.scanner_service = LogFileScannerService(default_log_parser_service, logger)
 
     # ------------------------------------------------------------------ #
@@ -108,9 +109,9 @@ class NEUFLogService:
     #  Database lifecycle                                                   #
     # ------------------------------------------------------------------ #
 
-    def _create_database_service(self, sql_db):
+    def _create_database_service(self, sql_db, sql_logger=None):
         """Build DatabaseWrapper + DatabaseService pair from a raw sqlite3 connection."""
-        db = DatabaseWrapper(sql_db)
+        db = DatabaseWrapper(sql_db, sql_logger)
         svc = DatabaseService(db, self.logger)
         svc.register_custom_functions()
         return {'db': db, 'databaseService': svc}
@@ -127,8 +128,28 @@ class NEUFLogService:
         if not os.path.exists(db_path):
             raise Exception('Database not found. Please scan logs first.')
 
-        conn = sqlite3.connect(db_path)
-        result = self._create_database_service(conn)
+        # Verify schema version before loading into memory to avoid wasted work
+        file_conn = sqlite3.connect(db_path)
+        stored_version = self._create_database_service(file_conn)['databaseService'].get_schema_version()
+        file_conn.close()
+        if stored_version != DB_SCHEMA_VERSION:
+            os.unlink(db_path)
+            self.logger(
+                f'⚠️  Schema mismatch (stored v{stored_version}, expected v{DB_SCHEMA_VERSION}). '
+                f'Database cleared: {db_path}'
+            )
+            raise Exception(
+                f'Database schema outdated (v{stored_version} → v{DB_SCHEMA_VERSION}). '
+                f'Please re-scan logs.'
+            )
+
+        # Load file DB entirely into memory for faster queries
+        file_conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(':memory:')
+        file_conn.backup(conn)
+        file_conn.close()
+        # Enable sql_logger only on the query-time connection
+        result = self._create_database_service(conn, self.sql_logger)
         result['dbPath'] = db_path
 
         NEUFLogService._db_cache[resolved] = result
@@ -186,10 +207,26 @@ class NEUFLogService:
 
         self._invalidate_folder_caches(folder_path)
 
-        # Return early if DB already exists
+        # Return early if DB already exists and schema version matches
         if os.path.exists(db_path):
-            self.logger('⚠️  Database already exists. Skipping scan.')
-            return self._create_already_scanned_result(db_path, log_folder_path)
+            try:
+                file_conn = sqlite3.connect(db_path)
+                stored_version = self._create_database_service(file_conn)['databaseService'].get_schema_version()
+                file_conn.close()
+            except Exception:
+                stored_version = None
+
+            if stored_version == DB_SCHEMA_VERSION:
+                self.logger('⚠️  Database already exists. Skipping scan.')
+                return self._create_already_scanned_result(db_path, log_folder_path)
+            else:
+                self.logger(
+                    f'⚠️  Schema mismatch (stored v{stored_version}, expected v{DB_SCHEMA_VERSION}). '
+                    f'Re-scanning: {db_path}'
+                )
+                os.unlink(db_path)
+                self._invalidate_folder_caches(folder_path)
+                # Fall through to full re-scan
 
         self.logger('📊 Scanning and indexing logs...')
 
@@ -293,10 +330,34 @@ class NEUFLogService:
     #  Filter pipeline                                                      #
     # ------------------------------------------------------------------ #
 
+    _ARRAY_FILTER_KEYS = [
+        'filenameInclude', 'filenameExclude',
+        'logLevelInclude', 'logLevelExclude',
+        'threadInclude',   'threadExclude',
+        'deviceInclude',   'deviceExclude',
+        'componentInclude','componentExclude',
+    ]
+
+    def _has_active_filters(self, filters):
+        """Return True if any meaningful filter is present."""
+        if not filters:
+            return False
+        if filters.get('preset'):
+            return True
+        if filters.get('search'):
+            return True
+        if filters.get('timeFrom') is not None or filters.get('timeTo') is not None:
+            return True
+        for key in self._ARRAY_FILTER_KEYS:
+            if filters.get(key):
+                return True
+        return False
+
     def _get_filter_output_table(self, normalized_filters):
         filters_key = json.dumps(normalized_filters, sort_keys=True)
         h = hashlib.md5(filters_key.encode()).hexdigest()
         return f'filter_{h}'
+
 
     def _is_valid_table(self, input_table):
         return bool(isinstance(input_table, str)
@@ -328,15 +389,19 @@ class NEUFLogService:
         page          = paging['page']
         page_size     = paging['pageSize']
         norm_filters  = filters or {}
-        source_table  = 'logs'
-        output_table  = self._get_filter_output_table(norm_filters)
+        source_table  = 'logs_view'
 
         self.logger(
             f'🔍 Filtering logs with page: {page}, pageSize: {page_size}, '
             f'sourceTable: {source_table}, filtersKey: {json.dumps(norm_filters)}'
         )
 
-        database_service.execute_filter_step(norm_filters, source_table, output_table)
+        if self._has_active_filters(norm_filters):
+            output_table = self._get_filter_output_table(norm_filters)
+            database_service.execute_filter_step(norm_filters, source_table, output_table)
+        else:
+            # No filters active — read directly from logs, skip temp table
+            output_table = source_table
         total  = self._get_output_table_count(database_service, output_table)
         offset = (page - 1) * page_size
 
@@ -381,7 +446,7 @@ class NEUFLogService:
         cached           = await self.load_database(folder_path)
         database_service = cached['databaseService']
 
-        source_table = input_table if self._is_valid_table(input_table) else 'logs'
+        source_table = input_table if self._is_valid_table(input_table) else 'logs_view'
         self.logger(
             f'📋 Getting filter options, sourceTable: {source_table}, '
             f'limitedOptions: {limited_options}'
@@ -399,7 +464,7 @@ class NEUFLogService:
         conn = database_service.db.db
         conn.row_factory = sqlite3.Row
         install_logs = conn.execute(
-            "SELECT device_id, timestamp FROM logs "
+            "SELECT device_id, timestamp FROM logs_view "
             "WHERE component_name LIKE '%LifecycleProvider' "
             "AND message LIKE 'Fujifilm dws:install%' "
             "ORDER BY device_id, timestamp ASC"

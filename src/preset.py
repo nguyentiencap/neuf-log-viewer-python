@@ -25,9 +25,9 @@ class PresetService:
     @staticmethod
     def get_user_presets_path():
         """Return full path to the user-defined preset.json at the project root."""
-        # python-port/src/ → up two levels → project root
+        # src/ → up 1 levels → project root
         return os.path.join(
-            os.path.dirname(__file__), '..', '..', 'preset.json'
+            os.path.dirname(__file__), '..', 'preset.json'
         )
 
     @staticmethod

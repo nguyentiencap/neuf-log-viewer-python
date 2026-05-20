@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NEUF Log Viewer</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+  <script src="helper.js"></script>
+</head>
+<body>
+  <!-- Status Bar -->
+  <div id="statusBar" class="status-bar"></div>
+
+  <div id="log-viewer">
+    <div id="log-toolbar">
+      <label class="show-all-label">
+        <input type="checkbox" id="showAllCheckbox"> Show all (expand log entries)
+      </label>
+      <label class="show-all-label" for="exportFormatSelect">
+        Export format:
+        <select id="exportFormatSelect">
+          <option value="full" selected>Full</option>
+          <option value="compact">Compact (no thread/device)</option>
+          <option value="csv">CSV</option>
+          <option value="json">JSON</option>
+        </select>
+      </label>
+      <button id="exportLogBtn" class="toolbar-action-btn">📤 Export Logs</button>
+    </div>
+    <div id="log-container">
+      <div class="logs-placeholder">Loading logs...</div>
+    </div>
+    
+    <div id="pagination">
+      <button id="prevPageBtn" disabled>← Previous</button>
+      <span class="page-info">
+        <span id="pageInfo">Page 1/1</span> | <span id="resultsInfo">Log from 0 to 0/0 logs</span>
+      </span>
+      <div class="jump-to-page">
+        <span>Jump to:</span>
+        <input type="number" id="jumpPageInput" min="1" max="1" value="1" />
+        <button id="jumpPageBtn">Go</button>
+      </div>
+      <button id="nextPageBtn" disabled>Next →</button>
+    </div>
+  </div>
+  
+  <div id="filter-panel">
+    <div class="filter-scrollable">
+    <h3>🔍 Filters</h3>
+    
+    <!-- Active Filters -->
+    <div class="active-filters-group" id="activeFiltersGroup" style="display:none;">
+      <div class="active-filters-header">
+        <span>🏷️ Active Filters</span>
+      </div>
+      <div id="activeFilterTags" class="active-filter-tags"></div>
+    </div>
+
+    <!-- Preset Suggestions -->
+    <div class="preset-group" id="presetGroup" style="display:none;">
+      <div class="preset-header">
+        <span>⚡ Quick Filter Suggestions</span>
+      </div>
+      <div id="presetSuggestions" class="preset-suggestions"></div>
+    </div>
+
+    <div class="search-group">
+      <label>🔎 Search Message (support REGEX)</label>
+      <input type="text" id="searchFilter" placeholder="Enter search text...">
+      <div style="margin-top: 8px;">
+        <div style="display: flex; align-items: center; gap: 8px; flex-wrap: nowrap;">
+          <label style="font-size: 11px; font-weight: normal; color: #6c757d; display: flex; align-items: center; gap: 4px; white-space: nowrap; flex-shrink: 0;">
+            Context lines:
+            <input type="number" id="contextLinesFilter" min="0" max="50" value="0"
+                   style="width: 50px; padding: 4px; border: 1px solid #ced4da; border-radius: 3px; font-size: 11px;">
+          </label>
+          <label style="font-size: 11px; font-weight: normal; color: #6c757d; display: flex; align-items: center; gap: 4px; cursor: pointer; white-space: nowrap;">
+            <input type="checkbox" id="strictContextFilter" checked>
+            Strict context
+          </label>
+        </div>
+        <div style="font-size: 10px; color: #6c757d; margin-top: 4px; line-height: 1.4;">
+          💡 Set to 0 for exact matches only. Set to N to include N lines before and after each match.
+        </div>
+      </div>
+    </div>
+    
+    <!-- Time Filter -->
+    <div class="filter-group">
+      <div class="filter-header" onclick="toggleFilter(this)">
+        <span>⏰ Time</span>
+        <span class="toggle">▼</span>
+      </div>
+      <div class="filter-content">
+        <!-- Time range text inputs -->
+        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+          <div style="flex: 1;">
+            <label style="font-size: 11px; color: #6c757d; display: block; margin-bottom: 4px;">From (YYYY.MM.DD HH:mm:ss):</label>
+            <input type="text" id="timeFromFilter" placeholder="e.g. 2026.04.28 09:25:00" style="width: 100%; padding: 4px 6px; border: 1px solid #ced4da; border-radius: 3px; font-size: 11px; box-sizing: border-box;">
+          </div>
+          <div style="flex: 1;">
+            <label style="font-size: 11px; color: #6c757d; display: block; margin-bottom: 4px;">To (YYYY.MM.DD HH:mm:ss):</label>
+            <input type="text" id="timeToFilter" placeholder="e.g. 2026.04.28 09:35:00" style="width: 100%; padding: 4px 6px; border: 1px solid #ced4da; border-radius: 3px; font-size: 11px; box-sizing: border-box;">
+          </div>
+        </div>
+        <div class="checkbox-divider"></div>
+        <!-- 1-hour interval buckets (click to auto-fill timeFrom/timeTo) -->
+        <div style="font-size: 11px; color: #6c757d; margin-bottom: 4px;">1-hour intervals (click to fill time range):</div>
+        <div id="timeBucketCheckboxes" class="checkbox-list"></div>
+      </div>
+    </div>
+    
+    <!-- Filename Filter (Include/Exclude) -->
+    <div class="filter-group">
+      <div class="filter-header" onclick="toggleFilter(this)">
+        <span>📄 Log File</span>
+        <span class="toggle">▼</span>
+      </div>
+      <div class="filter-content">
+        <div class="filter-columns">
+          <div class="filter-column">
+            <div class="column-header">
+              <span class="column-title">✅ Include</span>
+              <input type="checkbox" id="selectAll_filenameInclude" onchange="toggleAll(this, 'filenameInclude')" title="Select All">
+            </div>
+            <div id="filenameIncludeCheckboxes" class="checkbox-list"></div>
+          </div>
+          <div class="filter-column">
+            <div class="column-header">
+              <span class="column-title">❌ Exclude</span>
+              <input type="checkbox" id="selectAll_filenameExclude" onchange="toggleAll(this, 'filenameExclude')" title="Select All">
+            </div>
+            <div id="filenameExcludeCheckboxes" class="checkbox-list"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Log Level Filter (Include/Exclude) -->
+    <div class="filter-group">
+      <div class="filter-header" onclick="toggleFilter(this)">
+        <span>📊 Log Level</span>
+        <span class="toggle">▼</span>
+      </div>
+      <div class="filter-content">
+        <div class="filter-columns">
+          <div class="filter-column">
+            <div class="column-header">
+              <span class="column-title">✅ Include</span>
+              <input type="checkbox" id="selectAll_logLevelInclude" onchange="toggleAll(this, 'logLevelInclude')" title="Select All">
+            </div>
+            <div id="logLevelIncludeCheckboxes" class="checkbox-list"></div>
+          </div>
+          <div class="filter-column">
+            <div class="column-header">
+              <span class="column-title">❌ Exclude</span>
+              <input type="checkbox" id="selectAll_logLevelExclude" onchange="toggleAll(this, 'logLevelExclude')" title="Select All">
+            </div>
+            <div id="logLevelExcludeCheckboxes" class="checkbox-list"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Device Filter (Include/Exclude) -->
+    <div class="filter-group">
+      <div class="filter-header" onclick="toggleFilter(this)">
+        <span>📱 Device ID</span>
+        <span class="toggle">▼</span>
+      </div>
+      <div class="filter-content">
+        <div class="filter-columns">
+          <div class="filter-column">
+            <div class="column-header">
+              <span class="column-title">✅ Include</span>
+              <input type="checkbox" id="selectAll_deviceInclude" onchange="toggleAll(this, 'deviceInclude')" title="Select All">
+            </div>
+            <div id="deviceIncludeCheckboxes" class="checkbox-list"></div>
+          </div>
+          <div class="filter-column">
+            <div class="column-header">
+              <span class="column-title">❌ Exclude</span>
+              <input type="checkbox" id="selectAll_deviceExclude" onchange="toggleAll(this, 'deviceExclude')" title="Select All">
+            </div>
+            <div id="deviceExcludeCheckboxes" class="checkbox-list"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Component Filter (Include/Exclude) -->
+    <div class="filter-group" id="componentFilterGroup">
+      <div class="filter-header" onclick="toggleFilter(this)">
+        <span>🔧 Component Name</span>
+        <span class="toggle">▼</span>
+      </div>
+      <div class="filter-content">
+        <div class="filter-columns">
+          <div class="filter-column">
+            <div class="column-header">
+              <span class="column-title">✅ Include</span>
+              <input type="checkbox" id="selectAll_componentInclude" onchange="toggleAll(this, 'componentInclude')" title="Select All">
+            </div>
+            <div id="componentIncludeCheckboxes" class="checkbox-list"></div>
+          </div>
+          <div class="filter-column">
+            <div class="column-header">
+              <span class="column-title">❌ Exclude</span>
+              <input type="checkbox" id="selectAll_componentExclude" onchange="toggleAll(this, 'componentExclude')" title="Select All">
+            </div>
+            <div id="componentExcludeCheckboxes" class="checkbox-list"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Thread Filter (Include/Exclude) -->
+    <div class="filter-group" id="threadFilterGroup">
+      <div class="filter-header" onclick="toggleFilter(this)">
+        <span>🧵 Thread Name</span>
+        <span class="toggle">▼</span>
+      </div>
+      <div class="filter-content">
+        <div class="filter-columns">
+          <div class="filter-column">
+            <div class="column-header">
+              <span class="column-title">✅ Include</span>
+              <input type="checkbox" id="selectAll_threadInclude" onchange="toggleAll(this, 'threadInclude')" title="Select All">
+            </div>
+            <div id="threadIncludeCheckboxes" class="checkbox-list"></div>
+          </div>
+          <div class="filter-column">
+            <div class="column-header">
+              <span class="column-title">❌ Exclude</span>
+              <input type="checkbox" id="selectAll_threadExclude" onchange="toggleAll(this, 'threadExclude')" title="Select All">
+            </div>
+            <div id="threadExcludeCheckboxes" class="checkbox-list"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    </div> <!-- end filter-scrollable -->
+
+    <div class="filter-actions-bottom">
+      <button id="applyFilterBtn" class="btn-action btn-apply">Apply Filters</button>
+      <button id="clearFilterBtn" class="btn-action btn-clear">Clear All Filters</button>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

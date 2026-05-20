@@ -6,7 +6,8 @@ Usage:
   python neuf_log_viewer_api.py <folderPath>
 
 Provides REST API endpoints for log analysis:
-  POST /filter_log          - Filter logs with pagination (includes filterOptions)
+  POST /filter_log          - Filter logs with pagination
+  POST /filter_option       - Get filter options for a result table
   POST /export_log          - Export filtered logs
   POST /preset_suggestions  - Get preset filter suggestions
   GET  /health              - Health check
@@ -14,13 +15,15 @@ Provides REST API endpoints for log analysis:
 
 import os
 import sys
+import traceback
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 # ---------------------------------------------------------------------------
@@ -49,6 +52,10 @@ class ExportLogRequest(BaseModel):
     filters: Optional[Dict[str, Any]] = None
     steps: Optional[List[Dict[str, Any]]] = None
     format: str = 'full'
+
+
+class FilterOptionRequest(BaseModel):
+    outputTable: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +138,7 @@ def create_app(folder_path: str, log_service=None) -> FastAPI:
     If log_service is None, a new NEUFLogService is created.
     """
     if log_service is None:
-        log_service = NEUFLogService(logger=print)
+        log_service = NEUFLogService(logger=print, sql_logger=print)
 
     app = FastAPI(title='NEUF Log Viewer API', version='1.0.0')
 
@@ -142,6 +149,27 @@ def create_app(folder_path: str, log_service=None) -> FastAPI:
         allow_methods=['*'],
         allow_headers=['*'],
     )
+
+    # -----------------------------------------------------------------------
+    # Request logging middleware
+    # -----------------------------------------------------------------------
+
+    @app.middleware('http')
+    async def log_requests(request: Request, call_next):
+        body_bytes = await request.body()
+        try:
+            body_str = body_bytes.decode('utf-8') if body_bytes else ''
+        except Exception:
+            body_str = '<binary>'
+        print(f'[REQUEST] {request.method} {request.url.path} body={body_str}')
+
+        # Re-inject body so downstream handlers can read it
+        async def receive():
+            return {'type': 'http.request', 'body': body_bytes}
+
+        request = Request(request.scope, receive)
+        response = await call_next(request)
+        return response
 
     # -----------------------------------------------------------------------
     # GET /health
@@ -168,6 +196,7 @@ def create_app(folder_path: str, log_service=None) -> FastAPI:
             result = await log_service.get_preset_suggestions(folder_path)
             return JSONResponse(result)
         except Exception:
+            traceback.print_exc()
             return JSONResponse({'success': False, 'error': 'Internal server error'}, status_code=500)
 
     # -----------------------------------------------------------------------
@@ -189,23 +218,31 @@ def create_app(folder_path: str, log_service=None) -> FastAPI:
                 folder_path, parsed_filters, {'page': body.page, 'pageSize': body.pageSize}
             )
 
-            # Fetch filter options from the output table
-            filter_options_result = await log_service.get_filter_options(
-                folder_path, result.get('outputTable')
-            )
-
             if body.raw:
-                return JSONResponse({**result, 'filterOptions': filter_options_result.get('data')})
+                return JSONResponse(result)
 
             # Format logs (API layer responsibility)
             formatted_logs = [log_service.format_log_entry(log, 'full') for log in result.get('logs', [])]
             return JSONResponse({
                 **result,
                 'logs': formatted_logs,
-                'filterOptions': filter_options_result.get('data'),
             })
 
         except Exception:
+            traceback.print_exc()
+            return JSONResponse({'success': False, 'error': 'Internal server error'}, status_code=500)
+
+    # -----------------------------------------------------------------------
+    # POST /filter_option
+    # -----------------------------------------------------------------------
+
+    @app.post('/filter_option')
+    async def filter_option(body: FilterOptionRequest):
+        try:
+            result = await log_service.get_filter_options(folder_path, body.outputTable)
+            return JSONResponse(result)
+        except Exception:
+            traceback.print_exc()
             return JSONResponse({'success': False, 'error': 'Internal server error'}, status_code=500)
 
     # -----------------------------------------------------------------------
@@ -299,7 +336,13 @@ def create_app(folder_path: str, log_service=None) -> FastAPI:
                 )
 
         except Exception:
+            traceback.print_exc()
             return JSONResponse({'success': False, 'error': 'Internal server error'}, status_code=500)
+
+    # Mount static frontend files AFTER all API routes so API routes take precedence
+    _public_dir = os.path.join(_HERE, 'public')
+    if os.path.isdir(_public_dir):
+        app.mount('/', StaticFiles(directory=_public_dir, html=True), name='public')
 
     return app
 
@@ -328,7 +371,7 @@ async def _main():
 
     print(f'📁 Folder path: {folder_path}')
 
-    log_service = NEUFLogService(logger=print)
+    log_service = NEUFLogService(logger=print, sql_logger=print)
     await log_service.initialize()
 
     print('\n🔍 Scanning logs...')
@@ -360,10 +403,12 @@ async def _main():
     print(f'📁 Folder path: {folder_path}')
     print()
     print('📋 Available endpoints:')
-    print('  POST   /filter_log           - Filter logs (includes filterOptions)')
+    print('  POST   /filter_log           - Filter logs')
+    print('  POST   /filter_option         - Get filter options for a result table')
     print('  POST   /export_log           - Export filtered logs')
     print('  POST   /preset_suggestions   - Get preset filter suggestions')
     print('  GET    /health               - Health check')
+    print('  GET    /                     - Frontend UI')
     print()
     print('Press Ctrl+C to stop the server')
 

@@ -7,8 +7,13 @@ Note: Uses Python's built-in sqlite3 module instead of sql.js.
 
 import re
 import sqlite3
+import time
 
 from .log_parser import log_parser_service
+
+# Bump this value whenever the database schema changes.
+# load_database will auto-clear any DB whose stored version differs.
+DB_SCHEMA_VERSION = 2
 
 
 class _Statement:
@@ -17,29 +22,29 @@ class _Statement:
     Mirrors the interface produced by the JS DatabaseWrapper.prepare() shim.
     """
 
-    def __init__(self, conn, sql):
-        self._conn = conn
+    def __init__(self, wrapper, sql):
+        self._wrapper = wrapper
         self._sql = sql
 
     def run(self, *params):
-        self._conn.execute(self._sql, params)
+        self._wrapper.execute(self._sql, params)
 
     def get(self, *params):
-        self._conn.row_factory = sqlite3.Row
-        cur = self._conn.execute(self._sql, params)
+        self._wrapper.db.row_factory = sqlite3.Row
+        cur = self._wrapper.execute(self._sql, params)
         row = cur.fetchone()
         if row is None:
             return None
         return dict(row)
 
     def all(self, *params):
-        self._conn.row_factory = sqlite3.Row
-        cur = self._conn.execute(self._sql, params)
+        self._wrapper.db.row_factory = sqlite3.Row
+        cur = self._wrapper.execute(self._sql, params)
         return [dict(r) for r in cur.fetchall()]
 
     def each(self, callback, *params):
-        self._conn.row_factory = sqlite3.Row
-        cur = self._conn.execute(self._sql, params)
+        self._wrapper.db.row_factory = sqlite3.Row
+        cur = self._wrapper.execute(self._sql, params)
         for row in cur:
             callback(dict(row))
 
@@ -50,12 +55,30 @@ class DatabaseWrapper:
     Wraps a sqlite3.Connection to mirror the JavaScript DatabaseWrapper API.
     """
 
-    def __init__(self, db):
-        """
-        @param db: sqlite3.Connection
-        """
+    def __init__(self, db, sql_logger=None):
         self.db = db
         self.db.row_factory = sqlite3.Row
+        self._sql_logger = sql_logger
+        self._trace_enabled = sql_logger is not None
+
+    def execute(self, sql, params=()):
+        """Execute a single SQL statement, logging execution time when trace is enabled."""
+        if self._trace_enabled and self._sql_logger is not None:
+            t0 = time.perf_counter()
+            result = self.db.execute(sql, params)
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            self._sql_logger(f'[{elapsed_ms:.2f}ms] {sql.strip()}')
+            return result
+        return self.db.execute(sql, params)
+
+    def disable_trace(self):
+        """Temporarily disable SQL trace callback (e.g. during bulk inserts)."""
+        self._trace_enabled = False
+
+    def restore_trace(self):
+        """Re-enable SQL trace callback after disable_trace()."""
+        if self._sql_logger is not None:
+            self._trace_enabled = True
 
     def exec(self, sql):
         """Execute one or more semicolon-separated SQL statements."""
@@ -63,7 +86,7 @@ class DatabaseWrapper:
 
     def prepare(self, sql):
         """Return a statement-like object with run / get / all / each methods."""
-        return _Statement(self.db, sql)
+        return _Statement(self, sql)
 
     def transaction(self, fn):
         """
@@ -113,6 +136,30 @@ class DatabaseService:
     # ------------------------------------------------------------------ #
     #  WHERE clause builder                                                 #
     # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _sql_literal(value):
+        """Convert a Python value to a safe SQL literal for embedding in VIEW definitions."""
+        if value is None:
+            return 'NULL'
+        if isinstance(value, bool):
+            return '1' if value else '0'
+        if isinstance(value, (int, float)):
+            return str(value)
+        return "'" + str(value).replace("'", "''") + "'"
+
+    def _build_literal_where(self, filters):
+        """
+        Build a WHERE clause string with literal values embedded (no ? placeholders).
+        Used for CREATE TEMP VIEW where parameterized queries are not supported.
+        """
+        clause = self.build_where_clause(filters)
+        where = clause['where']
+        params = iter(clause['params'])
+        return ''.join(
+            self._sql_literal(next(params)) if ch == '?' else ch
+            for ch in where
+        )
 
     def build_where_clause(self, filters, exclude_field=None):
         """
@@ -260,39 +307,91 @@ class DatabaseService:
         self.db.register_function('REGEXP', regexp_fn)
         self.db.register_function('BUCKET_LABEL', bucket_label_fn)
 
+    def get_schema_version(self):
+        """Return the stored schema version integer, or None if not present."""
+        try:
+            row = self.db.prepare(
+                "SELECT value FROM schema_meta WHERE key = 'version'"
+            ).get()
+            return int(row['value']) if row else None
+        except Exception:
+            return None
+
     # ------------------------------------------------------------------ #
     #  Schema management                                                    #
     # ------------------------------------------------------------------ #
 
     def init_database(self):
-        """Create logs table and indexes."""
+        """Create lookup tables, logs table, logs_view, and indexes."""
         self.register_custom_functions()
+        # Enable auto_vacuum to automatically reclaim free pages on next VACUUM
+        self.db.db.execute('PRAGMA auto_vacuum = FULL')
         self.db.exec("""
-            CREATE TABLE IF NOT EXISTS logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                filename TEXT NOT NULL,
-                timestamp TEXT NOT NULL,
-                thread_name TEXT NOT NULL,
-                device_id TEXT,
-                component_name TEXT,
-                log_level TEXT,
-                time_bucket INTEGER,
-                message TEXT NOT NULL
+            CREATE TABLE IF NOT EXISTS files (
+                id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT UNIQUE NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_filename ON logs(filename);
-            CREATE INDEX IF NOT EXISTS idx_timestamp ON logs(timestamp);
-            CREATE INDEX IF NOT EXISTS idx_thread_name ON logs(thread_name);
-            CREATE INDEX IF NOT EXISTS idx_device_id ON logs(device_id);
-            CREATE INDEX IF NOT EXISTS idx_component_name ON logs(component_name);
-            CREATE INDEX IF NOT EXISTS idx_log_level ON logs(log_level);
-            CREATE INDEX IF NOT EXISTS idx_time_bucket ON logs(time_bucket);
+            CREATE TABLE IF NOT EXISTS threads (
+                id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS devices (
+                id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS components (
+                id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS log_levels (
+                id   INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS logs (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename_id  INTEGER NOT NULL REFERENCES files(id),
+                timestamp    TEXT    NOT NULL,
+                thread_id    INTEGER NOT NULL REFERENCES threads(id),
+                device_id    INTEGER          REFERENCES devices(id),
+                component_id INTEGER          REFERENCES components(id),
+                log_level_id INTEGER          REFERENCES log_levels(id),
+                time_bucket  INTEGER,
+                message      TEXT    NOT NULL
+            );
+            CREATE VIEW IF NOT EXISTS logs_view AS
+                SELECT l.id,
+                       f.filename,
+                       l.timestamp,
+                       t.name  AS thread_name,
+                       d.name  AS device_id,
+                       c.name  AS component_name,
+                       ll.name AS log_level,
+                       l.time_bucket,
+                       l.message
+                FROM logs l
+                JOIN  files      f  ON f.id  = l.filename_id
+                JOIN  threads    t  ON t.id  = l.thread_id
+                LEFT JOIN devices    d  ON d.id  = l.device_id
+                LEFT JOIN components c  ON c.id  = l.component_id
+                LEFT JOIN log_levels ll ON ll.id = l.log_level_id;
+            CREATE INDEX IF NOT EXISTS idx_filename_id  ON logs(filename_id);
+            CREATE INDEX IF NOT EXISTS idx_thread_id    ON logs(thread_id);
+            CREATE INDEX IF NOT EXISTS idx_device_id    ON logs(device_id);
+            CREATE INDEX IF NOT EXISTS idx_component_id ON logs(component_id);
+            CREATE INDEX IF NOT EXISTS idx_log_level_id ON logs(log_level_id);
+            CREATE INDEX IF NOT EXISTS idx_time_bucket  ON logs(time_bucket);
+            CREATE TABLE IF NOT EXISTS schema_meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+            INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('version', '2');
         """)
 
     # ------------------------------------------------------------------ #
     #  Filter options                                                       #
     # ------------------------------------------------------------------ #
 
-    def get_filter_options(self, table_name='logs', limited_options=True):
+    def get_filter_options(self, table_name='logs_view', limited_options=True):
         """Return grouped distinct values with counts for each filter field."""
 
         def get_opts(column, order_by, limit=None):
@@ -355,28 +454,47 @@ class DatabaseService:
         """)
 
     def create_batch_insert_temp(self, insert_stmt):
-        def insert_many(logs):
-            for log in logs:
+        return self.db.transaction(
+            lambda logs: [
                 insert_stmt.run(
                     log['filename'], log['timestamp'], log['threadName'],
                     log.get('deviceId'), log.get('componentName'),
                     log.get('logLevel'), log.get('timeBucket'), log['message']
                 )
-        return self.db.transaction(insert_many)
+                for log in logs
+            ]
+        )
 
     def insert_from_temp_to_logs(self):
         self.db.exec("""
+            INSERT OR IGNORE INTO files(filename)
+            SELECT DISTINCT filename FROM temp_parsed_logs;
+            INSERT OR IGNORE INTO threads(name)
+            SELECT DISTINCT thread_name FROM temp_parsed_logs;
+            INSERT OR IGNORE INTO devices(name)
+            SELECT DISTINCT device_id FROM temp_parsed_logs WHERE device_id IS NOT NULL;
+            INSERT OR IGNORE INTO components(name)
+            SELECT DISTINCT component_name FROM temp_parsed_logs WHERE component_name IS NOT NULL;
+            INSERT OR IGNORE INTO log_levels(name)
+            SELECT DISTINCT log_level FROM temp_parsed_logs WHERE log_level IS NOT NULL;
             INSERT INTO logs
-                (filename, timestamp, thread_name, device_id, component_name,
-                 log_level, time_bucket, message)
-            SELECT filename, timestamp, thread_name, device_id, component_name,
-                   log_level, time_bucket, message
-            FROM temp_parsed_logs
-            ORDER BY timestamp ASC
+                (filename_id, timestamp, thread_id, device_id, component_id,
+                 log_level_id, time_bucket, message)
+            SELECT f.id, tp.timestamp, t.id, d.id, c.id, ll.id,
+                   tp.time_bucket, tp.message
+            FROM temp_parsed_logs tp
+            JOIN  files      f  ON f.filename = tp.filename
+            JOIN  threads    t  ON t.name     = tp.thread_name
+            LEFT JOIN devices    d  ON d.name = tp.device_id
+            LEFT JOIN components c  ON c.name = tp.component_name
+            LEFT JOIN log_levels ll ON ll.name = tp.log_level
+            ORDER BY tp.timestamp ASC
         """)
 
     def drop_temp_logs_table(self):
         self.db.exec('DROP TABLE IF EXISTS temp_parsed_logs')
+        # Reclaim pages freed by the temp table drop
+        self.db.db.execute('VACUUM')
 
     # ------------------------------------------------------------------ #
     #  Filter pipeline                                                      #
@@ -386,65 +504,91 @@ class DatabaseService:
         """
         Materialize filtered rows from input_table into output_table.
 
+        When contextLines is active, data is copied into a TEMP TABLE (required for
+        the multi-step proximity expansion). Otherwise a lightweight TEMP VIEW is
+        created so no data is copied at all.
+
         @param filters: Dict of filter parameters
         @param input_table: Source table name
-        @param output_table: Destination temp table name
+        @param output_table: Destination temp table/view name
         @returns: Dict { 'count': int }
         """
-        conn = self.db.db
-
         if input_table != output_table:
-            conn.execute(f'DROP TABLE IF EXISTS {output_table}')
-            conn.execute(f"""
-                CREATE TEMP TABLE {output_table} (
-                    id INTEGER PRIMARY KEY,
-                    filename TEXT NOT NULL,
-                    timestamp TEXT NOT NULL,
-                    thread_name TEXT NOT NULL,
-                    device_id TEXT,
-                    component_name TEXT,
-                    log_level TEXT,
-                    time_bucket INTEGER,
-                    message TEXT NOT NULL
-                )
-            """)
+            needs_temp_table = bool(
+                filters.get('search') and (filters.get('contextLines') or 0) > 0
+            )
 
-            # Step 1: insert matching rows (all filters including search)
-            clause = self.build_where_clause(filters)
-            sql = (f'INSERT INTO {output_table} SELECT * FROM {input_table} '
-                   f'{clause["where"]} ORDER BY timestamp ASC')
-            self.logger(sql)
-            conn.execute(sql, clause['params'])
-
-            # Step 2: context lines expansion
-            if filters.get('search') and (filters.get('contextLines') or 0) > 0:
-                context_lines = filters['contextLines']
-
-                # Context rows matching all non-search filters, within ±N of any match
-                no_search_clause = self.build_where_clause({**filters, 'search': None})
-                conn.execute(f"""
-                    INSERT OR IGNORE INTO {output_table}
-                    SELECT * FROM {input_table} i
-                    {no_search_clause['where']}
-                    AND EXISTS (
-                        SELECT 1 FROM {output_table} m
-                        WHERE i.id BETWEEN m.id - ? AND m.id + ?
+            if needs_temp_table:
+                # Materialize into a temp table (context lines requires multi-step expansion)
+                self.db.execute(f"""
+                    CREATE TEMP TABLE IF NOT EXISTS {output_table} (
+                        id INTEGER PRIMARY KEY,
+                        filename TEXT NOT NULL,
+                        timestamp TEXT NOT NULL,
+                        thread_name TEXT NOT NULL,
+                        device_id TEXT,
+                        component_name TEXT,
+                        log_level TEXT,
+                        time_bucket INTEGER,
+                        message TEXT NOT NULL
                     )
-                """, no_search_clause['params'] + [context_lines, context_lines])
+                """)
 
-                # Step 3: any rows within ±N of current output (pure proximity, no filter)
-                if not filters.get('strictContext'):
-                    conn.execute(f"""
+                # Only populate if newly created (empty table means first time for this filter)
+                existing_count = self.db.db.execute(
+                    f'SELECT COUNT(*) FROM {output_table}'
+                ).fetchone()[0]
+                if existing_count == 0:
+                    # Step 1: insert matching rows (all filters including search)
+                    clause = self.build_where_clause(filters)
+                    sql = (f'INSERT INTO {output_table} SELECT * FROM {input_table} '
+                           f'{clause["where"]} ORDER BY timestamp ASC')
+                    self.db.execute(sql, clause['params'])
+
+                    # Step 2: context lines expansion
+                    context_lines = filters['contextLines']
+
+                    # Context rows matching all non-search filters, within ±N of any match
+                    # Rewrite EXISTS so SQLite can use the PK index on output_table.id
+                    # (m.id BETWEEN i.id-N AND i.id+N  vs  i.id BETWEEN m.id-N AND m.id+N).
+                    # Also pre-filter i.id to the MIN/MAX range to avoid a full logs_view scan.
+                    no_search_clause = self.build_where_clause({**filters, 'search': None})
+                    self.db.execute(f"""
                         INSERT OR IGNORE INTO {output_table}
                         SELECT * FROM {input_table} i
-                        WHERE EXISTS (
+                        {no_search_clause['where']}
+                        AND i.id BETWEEN (SELECT MIN(id) FROM {output_table}) - ?
+                                     AND (SELECT MAX(id) FROM {output_table}) + ?
+                        AND EXISTS (
                             SELECT 1 FROM {output_table} m
-                            WHERE i.id BETWEEN m.id - ? AND m.id + ?
+                            WHERE m.id BETWEEN i.id - ? AND i.id + ?
                         )
-                    """, [context_lines, context_lines])
+                    """, no_search_clause['params'] + [context_lines, context_lines,
+                                                       context_lines, context_lines])
 
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
+                    # Step 3: any rows within ±N of current output (pure proximity, no filter)
+                    if not filters.get('strictContext'):
+                        self.db.execute(f"""
+                            INSERT OR IGNORE INTO {output_table}
+                            SELECT * FROM {input_table} i
+                            WHERE i.id BETWEEN (SELECT MIN(id) FROM {output_table}) - ?
+                                           AND (SELECT MAX(id) FROM {output_table}) + ?
+                            AND EXISTS (
+                                SELECT 1 FROM {output_table} m
+                                WHERE m.id BETWEEN i.id - ? AND i.id + ?
+                            )
+                        """, [context_lines, context_lines, context_lines, context_lines])
+
+            else:
+                # Create a lightweight temp view — no data copy, filter runs at query time
+                literal_where = self._build_literal_where(filters)
+                self.db.execute(
+                    f'CREATE TEMP VIEW IF NOT EXISTS {output_table} AS '
+                    f'SELECT * FROM {input_table} {literal_where}'
+                )
+
+        self.db.db.row_factory = sqlite3.Row
+        row = self.db.execute(
             f'SELECT COUNT(*) as count FROM {output_table}'
         ).fetchone()
         count = row['count'] if row else 0
@@ -456,19 +600,45 @@ class DatabaseService:
     # ------------------------------------------------------------------ #
 
     def prepare_insert(self):
-        return self.db.prepare("""
-            INSERT INTO logs
-                (filename, timestamp, thread_name, device_id, component_name,
-                 log_level, time_bucket, message)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """)
+        # Return lookup upsert statements + logs insert for create_batch_insert
+        files_stmt      = self.db.prepare('INSERT OR IGNORE INTO files(filename) VALUES (?)')
+        threads_stmt    = self.db.prepare('INSERT OR IGNORE INTO threads(name) VALUES (?)')
+        devices_stmt    = self.db.prepare('INSERT OR IGNORE INTO devices(name) VALUES (?)')
+        components_stmt = self.db.prepare('INSERT OR IGNORE INTO components(name) VALUES (?)')
+        log_levels_stmt = self.db.prepare('INSERT OR IGNORE INTO log_levels(name) VALUES (?)')
+        return (files_stmt, threads_stmt, devices_stmt, components_stmt, log_levels_stmt)
 
     def create_batch_insert(self, insert_stmt):
+        files_stmt, threads_stmt, devices_stmt, components_stmt, log_levels_stmt = insert_stmt
+
+        def _get_id(table, col, value):
+            if value is None:
+                return None
+            row = self.db.execute(f'SELECT id FROM {table} WHERE {col} = ?', (value,)).fetchone()
+            return row[0] if row else None
+
         def insert_many(logs):
             for log in logs:
-                insert_stmt.run(
-                    log['filename'], log['timestamp'], log['threadName'],
-                    log.get('deviceId'), log.get('componentName'),
-                    log.get('logLevel'), log.get('timeBucket'), log['message']
+                files_stmt.run(log['filename'])
+                threads_stmt.run(log['threadName'])
+                if log.get('deviceId'):
+                    devices_stmt.run(log['deviceId'])
+                if log.get('componentName'):
+                    components_stmt.run(log['componentName'])
+                if log.get('logLevel'):
+                    log_levels_stmt.run(log['logLevel'])
+                self.db.execute(
+                    'INSERT INTO logs (filename_id, timestamp, thread_id, device_id, '
+                    'component_id, log_level_id, time_bucket, message) VALUES (?,?,?,?,?,?,?,?)',
+                    (
+                        _get_id('files',      'filename', log['filename']),
+                        log['timestamp'],
+                        _get_id('threads',    'name', log['threadName']),
+                        _get_id('devices',    'name', log.get('deviceId')),
+                        _get_id('components', 'name', log.get('componentName')),
+                        _get_id('log_levels', 'name', log.get('logLevel')),
+                        log.get('timeBucket'),
+                        log['message'],
+                    )
                 )
         return self.db.transaction(insert_many)

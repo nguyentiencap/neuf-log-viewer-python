@@ -91,8 +91,9 @@ class LogFileScannerService:
                     if line_start:
                         # Flush previous entry
                         if current_entry is not None:
+                            raw = '\n'.join(current_entry['raw_parts'])
                             log_obj = self.parser_service.parse_line(
-                                current_entry['timestamp'] + ' ' + current_entry['raw'],
+                                current_entry['timestamp'] + ' ' + raw,
                                 current_entry['filename']
                             )
                             if log_obj is not None:
@@ -108,16 +109,17 @@ class LogFileScannerService:
                         current_entry = {
                             'filename': filename,
                             'timestamp': line_start['timestamp'],
-                            'raw': raw_content,
+                            'raw_parts': [raw_content],
                         }
                     else:
                         if current_entry is not None:
-                            current_entry['raw'] += '\n' + line
+                            current_entry['raw_parts'].append(line)
 
             # Flush last entry for this file
             if current_entry is not None:
+                raw = '\n'.join(current_entry['raw_parts'])
                 log_obj = self.parser_service.parse_line(
-                    current_entry['timestamp'] + ' ' + current_entry['raw'],
+                    current_entry['timestamp'] + ' ' + raw,
                     current_entry['filename']
                 )
                 if log_obj is not None:

@@ -101,7 +101,7 @@ class LogParserService:
         Detect if a line starts a new log entry.
 
         @param line: Raw log line string
-        @returns: Dict with keys (timestamp, timeBucket) or None
+        @returns: Dict with key (timestamp) or None
         """
         if not line:
             return None
@@ -110,9 +110,7 @@ class LogParserService:
         if not m:
             return None
 
-        timestamp = m.group(1)
-        time_bucket = self.get_time_bucket(timestamp)
-        return {'timestamp': timestamp, 'timeBucket': time_bucket}
+        return {'timestamp': m.group(1)}
 
     def normalize_component_name(self, component_name):
         """
