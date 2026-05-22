@@ -8,9 +8,11 @@ Public API
 DictionaryEntry
     Immutable value object representing one repeated-pattern entry.
 
-    entry_id     : str   — "key_{startLine}-{endLine}" (1-indexed, inclusive)
-    key_sequence : List[str]  — fully-expanded sequence of original keys
-    repeat_count : int   — how many times the pattern was found repeated
+    entry_id     : str              — "key_{startLine}-{endLine}" (1-indexed, inclusive)
+    key_sequence : tuple[str, ...]  — fully-expanded sequence of original keys
+    repeat_count : int              — how many times the pattern was found repeated
+    occurrences  : tuple[int, ...]  — 1-indexed start positions of every occurrence,
+                                      sorted ascending
 
 GroupingResult
     Combined result returned by group().
@@ -30,7 +32,8 @@ GroupingAlgorithm (ABC)
           {
             "entry_id":     "key_1-3",
             "key_sequence": ["A", "B", "C"],
-            "repeat_count": 5
+            "repeat_count": 5,
+            "occurrences":  [1, 7, 13]
           },
           ...
         ]
@@ -55,16 +58,19 @@ class DictionaryEntry:
     entry_id      — unique identifier: "key_{startLine}-{endLine}" (1-indexed)
     key_sequence  — fully-expanded list of original-key tokens forming the pattern
     repeat_count  — number of times this pattern was found repeated in the input
+    occurrences   — 1-indexed start positions of every occurrence, sorted ascending
     """
     entry_id:     str
     key_sequence: tuple          # immutable; serialised as list
     repeat_count: int
+    occurrences:  tuple = ()     # immutable; serialised as list; default empty for compat
 
     def to_dict(self) -> dict:
         return {
             "entry_id":     self.entry_id,
             "key_sequence": list(self.key_sequence),
             "repeat_count": self.repeat_count,
+            "occurrences":  list(self.occurrences),
         }
 
 
@@ -125,7 +131,8 @@ class GroupingAlgorithm(ABC):
         Run group() and write the dictionary part to *output_path* as JSON.
 
         The file will contain a JSON array of objects:
-          [{"entry_id": "key_1-2", "key_sequence": [...], "repeat_count": N}, ...]
+          [{"entry_id": "key_1-2", "key_sequence": [...], "repeat_count": N,
+            "occurrences": [1, ...]}, ...]
 
         @param items:       Any list of items.
         @param key_fn:      item -> str fingerprint extractor.

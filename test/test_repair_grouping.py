@@ -179,6 +179,33 @@ class TestRePairBuildDictionary(unittest.TestCase):
         for e in result.dictionary:
             self.assertGreaterEqual(e.repeat_count, 2)
 
+    def test_occurrences_nonempty(self):
+        its    = items(["A", "B"] * 3)
+        result = self.alg.group(its, key_fn)
+        for e in result.dictionary:
+            self.assertGreater(len(e.occurrences), 0)
+
+    def test_occurrences_sorted_ascending(self):
+        its    = items(["A", "B", "C"] * 4)
+        result = self.alg.group(its, key_fn)
+        for e in result.dictionary:
+            self.assertEqual(list(e.occurrences), sorted(e.occurrences))
+
+    def test_occurrences_are_1indexed(self):
+        its    = items(["A", "B", "A", "B"])
+        result = self.alg.group(its, key_fn)
+        for e in result.dictionary:
+            for pos in e.occurrences:
+                self.assertGreaterEqual(pos, 1)
+
+    def test_occurrences_first_position_matches_entry_id(self):
+        # [A,B] first at position 1 → entry_id key_1-2, occurrences[0] == 1
+        its    = items(["A", "B", "C", "A", "B"])
+        result = self.alg.group(its, key_fn)
+        ab_entry = next((e for e in result.dictionary if list(e.key_sequence) == ["A", "B"]), None)
+        self.assertIsNotNone(ab_entry)
+        self.assertEqual(ab_entry.occurrences[0], 1)
+
     def test_entry_id_1indexed_first_occurrence(self):
         # [A,B] first appears at positions 0-1 → entry_id key_1-2
         its    = items(["A", "B", "C", "A", "B"])

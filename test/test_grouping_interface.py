@@ -53,11 +53,13 @@ class TestDictionaryEntry(unittest.TestCase):
             entry_id     = "key_1-3",
             key_sequence = ("A", "B", "C"),
             repeat_count = 5,
+            occurrences  = (1, 4),
         )
         d = e.to_dict()
         self.assertEqual(d["entry_id"],     "key_1-3")
         self.assertEqual(d["key_sequence"], ["A", "B", "C"])
         self.assertEqual(d["repeat_count"], 5)
+        self.assertEqual(d["occurrences"],  [1, 4])
 
     def test_immutable(self):
         e = DictionaryEntry("key_1-1", ("X",), 2)
@@ -67,6 +69,15 @@ class TestDictionaryEntry(unittest.TestCase):
     def test_key_sequence_serialises_as_list(self):
         e = DictionaryEntry("key_1-2", ("P", "Q"), 3)
         self.assertIsInstance(e.to_dict()["key_sequence"], list)
+
+    def test_occurrences_serialises_as_list(self):
+        e = DictionaryEntry("key_1-2", ("P", "Q"), 3, (1, 5))
+        self.assertIsInstance(e.to_dict()["occurrences"], list)
+        self.assertEqual(e.to_dict()["occurrences"], [1, 5])
+
+    def test_occurrences_defaults_to_empty(self):
+        e = DictionaryEntry("key_1-1", ("X",), 2)
+        self.assertEqual(e.occurrences, ())
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +180,31 @@ class _InterfaceContractMixin:
         for e in result.dictionary:
             self.assertGreaterEqual(e.repeat_count, 2)
 
+    def test_dict_occurrences_nonempty(self):
+        its    = items(["A", "B", "A", "B"])
+        result = self.alg.group(its, key_fn)
+        for e in result.dictionary:
+            self.assertGreater(len(e.occurrences), 0)
+
+    def test_dict_occurrences_length_matches_repeat_count(self):
+        its    = items(["A", "B", "A", "B"])
+        result = self.alg.group(its, key_fn)
+        for e in result.dictionary:
+            self.assertEqual(len(e.occurrences), e.repeat_count)
+
+    def test_dict_occurrences_sorted_ascending(self):
+        its    = items(["A", "B", "C", "A", "B", "C"])
+        result = self.alg.group(its, key_fn)
+        for e in result.dictionary:
+            self.assertEqual(list(e.occurrences), sorted(e.occurrences))
+
+    def test_dict_occurrences_are_1indexed(self):
+        its    = items(["A", "B", "A", "B"])
+        result = self.alg.group(its, key_fn)
+        for e in result.dictionary:
+            for pos in e.occurrences:
+                self.assertGreaterEqual(pos, 1)
+
     # --- export_dictionary() ---
 
     def test_export_creates_valid_json(self):
@@ -196,9 +232,11 @@ class _InterfaceContractMixin:
                 self.assertIn("entry_id",     obj)
                 self.assertIn("key_sequence", obj)
                 self.assertIn("repeat_count", obj)
+                self.assertIn("occurrences",  obj)
                 self.assertIsInstance(obj["entry_id"],     str)
                 self.assertIsInstance(obj["key_sequence"], list)
                 self.assertIsInstance(obj["repeat_count"], int)
+                self.assertIsInstance(obj["occurrences"],  list)
         finally:
             import os
             os.unlink(path)

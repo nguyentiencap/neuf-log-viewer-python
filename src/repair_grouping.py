@@ -89,6 +89,7 @@ def _run_repair(
     List[Any],                    # final_seq
     List[int],                    # rule_first_pos  (0-indexed, per rule)
     List[Tuple[int, int]],        # drop_ranges     [(start, end_inclusive), ...]
+    List[List[int]],              # rule_all_starts (0-indexed orig_start per occurrence, per rule)
 ]:
     """
     Run RE-PAIR on *keys*.
@@ -101,12 +102,14 @@ def _run_repair(
                       of its leftmost (first) occurrence in *keys*
     drop_ranges     : list of (start, end_inclusive) in 0-indexed original
                       coordinates, one range per non-first occurrence of each rule
+    rule_all_starts : for each rule R_k, sorted list of 0-indexed original start
+                      positions of ALL occurrences (first + duplicates)
     """
     n = len(keys)
     if n == 0:
-        return [], [], [], []
+        return [], [], [], [], []
     if n == 1:
-        return [], list(keys), [], []
+        return [], list(keys), [], [], []
 
     # --- doubly-linked list ---
     val: List[Any]  = list(keys)
@@ -131,9 +134,10 @@ def _run_repair(
         heapq.heappush(heap, (-len(positions), _seq[0], pair))
         _seq[0] += 1
 
-    rules:          List[Tuple[Any, Any, int]] = []
-    rule_first_pos: List[int]                  = []
-    drop_ranges:    List[Tuple[int, int]]      = []
+    rules:           List[Tuple[Any, Any, int]] = []
+    rule_first_pos:  List[int]                  = []
+    drop_ranges:     List[Tuple[int, int]]      = []
+    rule_all_starts: List[List[int]]            = []
 
     def _push(pair: Tuple) -> None:
         c = len(pair_occ.get(pair, ()))
@@ -159,6 +163,7 @@ def _run_repair(
         # Sort by orig_start to put the first (leftmost) occurrence first.
         positions.sort(key=lambda idx: orig_start[idx])
         first_orig = -1
+        occ_starts: List[int] = []
 
         for i in positions:
             if not act[i]:
@@ -173,6 +178,8 @@ def _run_repair(
             # Capture range BEFORE merge
             r_start = orig_start[i]
             r_end   = orig_end[j]
+
+            occ_starts.append(r_start)
 
             if first_orig == -1:
                 first_orig = r_start   # first occurrence → keep
@@ -215,6 +222,7 @@ def _run_repair(
                 _push(new_pair)
 
         rule_first_pos.append(first_orig if first_orig != -1 else 0)
+        rule_all_starts.append(sorted(occ_starts))
 
     # --- reconstruct final sequence ---
     final: List[Any] = []
@@ -225,7 +233,7 @@ def _run_repair(
         final.append(val[i])
         i = nxt[i]
 
-    return rules, final, rule_first_pos, drop_ranges
+    return rules, final, rule_first_pos, drop_ranges, rule_all_starts
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +290,7 @@ class RePairGroupingAlgorithm(GroupingAlgorithm):
             return GroupingResult(deduplicated=[], dictionary=[])
 
         keys  = [key_fn(item) for item in items]
-        rules, _final, rule_first_pos, drop_ranges = _run_repair(keys)
+        rules, _final, rule_first_pos, drop_ranges, rule_all_starts = _run_repair(keys)
 
         # --- deduplicated list ---
         if not drop_ranges:
@@ -311,6 +319,7 @@ class RePairGroupingAlgorithm(GroupingAlgorithm):
                 entry_id     = f"key_{start_line}-{end_line}",
                 key_sequence = tuple(exp),
                 repeat_count = freq,
+                occurrences  = tuple(s + 1 for s in rule_all_starts[rule_idx]),
             ))
 
         entries.sort(key=lambda e: e.repeat_count, reverse=True)

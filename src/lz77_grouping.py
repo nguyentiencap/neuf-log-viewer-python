@@ -242,16 +242,19 @@ class LZ77GroupingAlgorithm(GroupingAlgorithm):
                 continue
             seen.add(block)
             plen = len(block)
-            start_line = 1
-            for i in range(len(keys) - plen + 1):
-                if tuple(keys[i: i + plen]) == block:
-                    start_line = i + 1      # 1-indexed
-                    break
+            # Find all occurrence positions of this block in the original keys.
+            all_occ = tuple(
+                i + 1  # 1-indexed
+                for i in range(len(keys) - plen + 1)
+                if tuple(keys[i: i + plen]) == block
+            )
+            start_line = all_occ[0] if all_occ else 1
             end_line = start_line + plen - 1
             entries.append(DictionaryEntry(
                 entry_id     = f"key_{start_line}-{end_line}",
                 key_sequence = block,
                 repeat_count = count + 1,   # +1 for the original occurrence
+                occurrences  = all_occ,
             ))
 
         entries.sort(key=lambda e: e.repeat_count, reverse=True)
