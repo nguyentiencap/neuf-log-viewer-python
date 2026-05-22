@@ -557,9 +557,10 @@ class NEUFLogService:
         """
         Apply duplicate filtering to a list of log rows using GroupingAlgorithm.
 
-        The grouping key is the pre-computed (hash_hi << 64 | hash_lo) stored in each
-        row — avoids re-hashing device_id + component_name + message at query
-        time.  Rows that lack a hash are always emitted unchanged.
+        The grouping key is reconstructed as (hash_hi << 64 | hash_lo) from the
+        stored hash halves in each row — avoids re-hashing
+        device_id + component_name + message at query time. Rows that lack a
+        hash are always emitted unchanged.
 
         @param logs:       List of log-row dicts (as returned by filter_logs).
         @param dedup_mode: 'none'     — return logs unchanged.
