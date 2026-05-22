@@ -25,14 +25,14 @@ Entries are sorted by repeat_count DESC.
 
 Grouping behaviour
 ------------------
-group() runs RE-PAIR and removes all items that belong to a repeated pattern
-after the first occurrence (similar to LZ77 filter_duplicate=True behaviour).
+group() runs RE-PAIR in a single pass, removing items that belong to a repeated
+pattern after the first occurrence and building the pattern dictionary at the
+same time.  Both results are returned together as a GroupingResult.
 
 Public API
 ----------
 RePairGroupingAlgorithm
-    .group(items, key_fn, **kwargs)              -> List[Any]
-    .build_dictionary(items, key_fn, **kwargs)   -> List[DictionaryEntry]
+    .group(items, key_fn, **kwargs)              -> GroupingResult
     .export_dictionary(items, key_fn, path, ...) -> None  (inherited)
 """
 
@@ -40,7 +40,7 @@ import heapq
 from collections import defaultdict
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from .grouping_interface import DictionaryEntry, GroupingAlgorithm
+from .grouping_interface import DictionaryEntry, GroupingAlgorithm, GroupingResult
 
 
 # ---------------------------------------------------------------------------
@@ -236,12 +236,13 @@ class RePairGroupingAlgorithm(GroupingAlgorithm):
     """
     GroupingAlgorithm implementation using the RE-PAIR algorithm.
 
-    build_dictionary() returns one DictionaryEntry per RE-PAIR rule with
-    key_sequence fully expanded to original tokens.
-
-    group() removes items that are part of a repeated pattern after its
-    first occurrence, using the drop-range information emitted directly
-    by _run_repair (O(n + total_replacements), no post-hoc scan).
+    group() runs RE-PAIR in a single pass and returns a GroupingResult
+    containing:
+      - deduplicated: items with repeated-pattern copies removed after the
+        first occurrence (drop-range info is emitted directly by _run_repair,
+        O(n + total_replacements), no post-hoc scan).
+      - dictionary: one DictionaryEntry per RE-PAIR rule, with key_sequence
+        fully expanded to original tokens and sorted by repeat_count DESC.
     """
 
     # ------------------------------------------------------------------
@@ -268,52 +269,33 @@ class RePairGroupingAlgorithm(GroupingAlgorithm):
         items: List[Any],
         key_fn: Callable[[Any], str],
         **kwargs,
-    ) -> List[Any]:
+    ) -> GroupingResult:
         """
-        Remove items that belong to a repeated pattern after its first
-        occurrence, using RE-PAIR to identify the repeated patterns.
+        Deduplicate items and build the pattern dictionary in a single RE-PAIR
+        pass, returning both as a GroupingResult.
 
-        The first occurrence of every repeated block is kept; all
-        subsequent copies are dropped.  Drop ranges are collected in O(n)
+        The first occurrence of every repeated block is kept; all subsequent
+        copies are dropped.  Drop ranges and rule data are collected in O(n)
         directly during the RE-PAIR run — no post-hoc scan over the input.
         """
         if not items:
-            return []
+            return GroupingResult(deduplicated=[], dictionary=[])
 
         keys  = [key_fn(item) for item in items]
-        _rules, _final, _rfp, drop_ranges = _run_repair(keys)
+        rules, _final, rule_first_pos, drop_ranges = _run_repair(keys)
+
+        # --- deduplicated list ---
         if not drop_ranges:
-            return list(items)
+            deduplicated = list(items)
+        else:
+            keep = bytearray(b'\x01' * len(keys))
+            for (start, end) in drop_ranges:
+                keep[start: end + 1] = b'\x00' * (end - start + 1)
+            deduplicated = [item for idx, item in enumerate(items) if keep[idx]]
 
-        keep = bytearray(b'\x01' * len(keys))   # 1 = keep, 0 = drop
-        for (start, end) in drop_ranges:
-            keep[start: end + 1] = b'\x00' * (end - start + 1)
-
-        return [item for idx, item in enumerate(items) if keep[idx]]
-
-    def build_dictionary(
-        self,
-        items: List[Any],
-        key_fn: Callable[[Any], str],
-        **kwargs,
-    ) -> List[DictionaryEntry]:
-        """
-        Run RE-PAIR and return one DictionaryEntry per rule, sorted by
-        repeat_count DESC.
-
-        Each rule is fully expanded (recursively substituted) so that
-        key_sequence contains only original token keys — never rule ids.
-
-        entry_id is derived from rule_first_pos returned by _run_repair
-        (no additional scan of the original input is needed).
-        """
-        if not items:
-            return []
-
-        keys = [key_fn(item) for item in items]
-        rules, _final, rule_first_pos, _dr = _run_repair(keys)
+        # --- dictionary ---
         if not rules:
-            return []
+            return GroupingResult(deduplicated=deduplicated, dictionary=[])
 
         expanded_rules = self._expand_all(rules)
         entries: List[DictionaryEntry] = []
@@ -332,4 +314,4 @@ class RePairGroupingAlgorithm(GroupingAlgorithm):
             ))
 
         entries.sort(key=lambda e: e.repeat_count, reverse=True)
-        return entries
+        return GroupingResult(deduplicated=deduplicated, dictionary=entries)

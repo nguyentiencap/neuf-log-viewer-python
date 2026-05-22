@@ -3,8 +3,7 @@ Test Suite for the generic GroupingAlgorithm interface.
 
 Tests both concrete implementations (LZ77GroupingAlgorithm and
 RePairGroupingAlgorithm) through the shared interface, covering:
-  - group()            — basic deduplication behaviour
-  - build_dictionary() — DictionaryEntry contents and ordering
+  - group()            — returns GroupingResult with deduplicated items and dict
   - export_dictionary()— JSON serialisation
   - Performance        — 10 000 and 100 000 items
 """
@@ -20,7 +19,7 @@ from typing import List
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.grouping_interface import DictionaryEntry, GroupingAlgorithm
+from src.grouping_interface import DictionaryEntry, GroupingAlgorithm, GroupingResult
 from src.lz77_grouping   import LZ77GroupingAlgorithm
 from src.repair_grouping import RePairGroupingAlgorithm
 
@@ -80,59 +79,66 @@ class _InterfaceContractMixin:
     Subclasses must set `self.alg` to a concrete instance.
     """
 
-    # --- group() ---
+    # --- group() returns a GroupingResult ---
 
     def test_group_is_grouping_algorithm(self):
         self.assertIsInstance(self.alg, GroupingAlgorithm)
 
+    def test_group_returns_grouping_result(self):
+        result = self.alg.group([], key_fn)
+        self.assertIsInstance(result, GroupingResult)
+
     def test_group_empty_returns_empty(self):
-        self.assertEqual(self.alg.group([], key_fn), [])
+        result = self.alg.group([], key_fn)
+        self.assertEqual(result.deduplicated, [])
+        self.assertEqual(result.dictionary, [])
 
     def test_group_all_unique_unchanged(self):
         its    = items(["X", "Y", "Z"])
         result = self.alg.group(its, key_fn)
-        self.assertEqual(len(result), 3)
+        self.assertEqual(len(result.deduplicated), 3)
 
     def test_group_removes_duplicates(self):
         its    = items(["A", "B", "A", "B"])
         result = self.alg.group(its, key_fn)
-        keys   = [r["k"] for r in result]
+        keys   = [r["k"] for r in result.deduplicated]
         self.assertEqual(keys.count("A"), 1)
         self.assertEqual(keys.count("B"), 1)
 
     def test_group_single_item(self):
         its    = items(["Z"])
         result = self.alg.group(its, key_fn)
-        self.assertEqual(len(result), 1)
+        self.assertEqual(len(result.deduplicated), 1)
 
-    # --- build_dictionary() ---
+    # --- dictionary field ---
 
-    def test_build_dict_empty_returns_empty(self):
-        self.assertEqual(self.alg.build_dictionary([], key_fn), [])
+    def test_dict_empty_returns_empty(self):
+        result = self.alg.group([], key_fn)
+        self.assertEqual(result.dictionary, [])
 
-    def test_build_dict_all_unique_returns_empty(self):
-        its     = items(["X", "Y", "Z"])
-        entries = self.alg.build_dictionary(its, key_fn)
-        self.assertEqual(entries, [])
+    def test_dict_all_unique_returns_empty(self):
+        its    = items(["X", "Y", "Z"])
+        result = self.alg.group(its, key_fn)
+        self.assertEqual(result.dictionary, [])
 
-    def test_build_dict_returns_dict_entries(self):
-        its     = items(["A", "B", "A", "B"])
-        entries = self.alg.build_dictionary(its, key_fn)
-        self.assertGreater(len(entries), 0)
-        for e in entries:
+    def test_dict_returns_dict_entries(self):
+        its    = items(["A", "B", "A", "B"])
+        result = self.alg.group(its, key_fn)
+        self.assertGreater(len(result.dictionary), 0)
+        for e in result.dictionary:
             self.assertIsInstance(e, DictionaryEntry)
 
-    def test_build_dict_sorted_desc_by_repeat_count(self):
+    def test_dict_sorted_desc_by_repeat_count(self):
         # [A,B,C, A,B,C, A,B,C] — ABC repeats 2×; A repeats 2×; etc.
-        its     = items(["A", "B", "C"] * 3)
-        entries = self.alg.build_dictionary(its, key_fn)
-        counts  = [e.repeat_count for e in entries]
+        its    = items(["A", "B", "C"] * 3)
+        result = self.alg.group(its, key_fn)
+        counts = [e.repeat_count for e in result.dictionary]
         self.assertEqual(counts, sorted(counts, reverse=True))
 
-    def test_build_dict_entry_id_format(self):
-        its     = items(["A", "B", "A", "B"])
-        entries = self.alg.build_dictionary(its, key_fn)
-        for e in entries:
+    def test_dict_entry_id_format(self):
+        its    = items(["A", "B", "A", "B"])
+        result = self.alg.group(its, key_fn)
+        for e in result.dictionary:
             self.assertTrue(
                 e.entry_id.startswith("key_"),
                 f"entry_id '{e.entry_id}' does not start with 'key_'",
@@ -143,24 +149,24 @@ class _InterfaceContractMixin:
             self.assertTrue(parts[1].isdigit())
             self.assertLessEqual(int(parts[0]), int(parts[1]))
 
-    def test_build_dict_key_sequence_nonempty(self):
-        its     = items(["A", "B", "A", "B"])
-        entries = self.alg.build_dictionary(its, key_fn)
-        for e in entries:
+    def test_dict_key_sequence_nonempty(self):
+        its    = items(["A", "B", "A", "B"])
+        result = self.alg.group(its, key_fn)
+        for e in result.dictionary:
             self.assertGreater(len(e.key_sequence), 0)
 
-    def test_build_dict_key_sequence_contains_original_keys(self):
+    def test_dict_key_sequence_contains_original_keys(self):
         orig_keys = {"A", "B", "C"}
         its       = items(["A", "B", "C", "A", "B", "C"])
-        entries   = self.alg.build_dictionary(its, key_fn)
-        for e in entries:
+        result    = self.alg.group(its, key_fn)
+        for e in result.dictionary:
             for sym in e.key_sequence:
                 self.assertIn(sym, orig_keys)
 
-    def test_build_dict_repeat_count_at_least_2(self):
-        its     = items(["A", "B", "A", "B"])
-        entries = self.alg.build_dictionary(its, key_fn)
-        for e in entries:
+    def test_dict_repeat_count_at_least_2(self):
+        its    = items(["A", "B", "A", "B"])
+        result = self.alg.group(its, key_fn)
+        for e in result.dictionary:
             self.assertGreaterEqual(e.repeat_count, 2)
 
     # --- export_dictionary() ---
@@ -266,13 +272,6 @@ def _measure_group(alg: GroupingAlgorithm, keys: List[str]) -> float:
     return time.perf_counter() - t0
 
 
-def _measure_dict(alg: GroupingAlgorithm, keys: List[str]) -> float:
-    its = [{"k": k} for k in keys]
-    t0  = time.perf_counter()
-    alg.build_dictionary(its, key_fn)
-    return time.perf_counter() - t0
-
-
 class TestLZ77Performance10k(unittest.TestCase):
     N   = 10_000
     ALG = LZ77GroupingAlgorithm
@@ -286,10 +285,6 @@ class TestLZ77Performance10k(unittest.TestCase):
 
     def test_group_all_unique(self):
         elapsed = _measure_group(self.ALG(), _make_all_unique(self.N))
-        self.assertLess(elapsed, self._limit())
-
-    def test_build_dict_block_repeat(self):
-        elapsed = _measure_dict(self.ALG(), _make_block_repeat(self.N))
         self.assertLess(elapsed, self._limit())
 
 
@@ -311,10 +306,6 @@ class TestRePairPerformance10k(unittest.TestCase):
 
     def test_group_all_unique(self):
         elapsed = _measure_group(self.ALG(), _make_all_unique(self.N))
-        self.assertLess(elapsed, self._limit())
-
-    def test_build_dict_block_repeat(self):
-        elapsed = _measure_dict(self.ALG(), _make_block_repeat(self.N))
         self.assertLess(elapsed, self._limit())
 
 

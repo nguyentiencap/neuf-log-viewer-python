@@ -2,8 +2,7 @@
 Test Suite for repair_grouping.py — RE-PAIR grouping algorithm.
 
 Covers:
-  - group()            — deduplication behaviour
-  - build_dictionary() — dictionary entries, expansion, sorting
+  - group()            — returns GroupingResult with deduplicated items and dict
   - export_dictionary()— JSON output via inherited method
   - Performance        — 10 000 and 100 000 items
 """
@@ -66,29 +65,30 @@ class TestRePairGroup(unittest.TestCase):
     alg = RePairGroupingAlgorithm()
 
     def test_empty_input(self):
-        self.assertEqual(self.alg.group([], key_fn), [])
+        result = self.alg.group([], key_fn)
+        self.assertEqual(result.deduplicated, [])
 
     def test_all_unique_unchanged(self):
         its    = items(["X", "Y", "Z"])
         result = self.alg.group(its, key_fn)
-        self.assertEqual(len(result), 3)
+        self.assertEqual(len(result.deduplicated), 3)
 
     def test_single_item(self):
         its    = items(["A"])
         result = self.alg.group(its, key_fn)
-        self.assertEqual(len(result), 1)
+        self.assertEqual(len(result.deduplicated), 1)
 
     def test_simple_duplicate_removed(self):
         its    = items(["A", "B", "A", "B"])
         result = self.alg.group(its, key_fn)
-        keys   = [r["k"] for r in result]
+        keys   = [r["k"] for r in result.deduplicated]
         self.assertEqual(keys.count("A"), 1)
         self.assertEqual(keys.count("B"), 1)
 
     def test_three_repeating_block(self):
         its    = items(["A", "B", "C", "A", "B", "C", "A", "B", "C"])
         result = self.alg.group(its, key_fn)
-        keys   = [r["k"] for r in result]
+        keys   = [r["k"] for r in result.deduplicated]
         # All three letters kept but duplicates removed
         self.assertEqual(keys.count("A"), 1)
         self.assertEqual(keys.count("B"), 1)
@@ -97,13 +97,13 @@ class TestRePairGroup(unittest.TestCase):
     def test_first_occurrence_kept(self):
         its    = items(["P", "Q", "P", "Q"])
         result = self.alg.group(its, key_fn)
-        self.assertEqual(result[0]["k"], "P")
-        self.assertEqual(result[1]["k"], "Q")
+        self.assertEqual(result.deduplicated[0]["k"], "P")
+        self.assertEqual(result.deduplicated[1]["k"], "Q")
 
     def test_unique_mixed_with_repeats(self):
         its    = items(["A", "B", "X", "A", "B", "Y"])
         result = self.alg.group(its, key_fn)
-        keys   = [r["k"] for r in result]
+        keys   = [r["k"] for r in result.deduplicated]
         self.assertIn("X", keys)
         self.assertIn("Y", keys)
         self.assertEqual(keys.count("A"), 1)
@@ -111,7 +111,7 @@ class TestRePairGroup(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# build_dictionary() — entries and expansion
+# dictionary field — entries and expansion
 # ---------------------------------------------------------------------------
 
 class TestRePairBuildDictionary(unittest.TestCase):
@@ -119,29 +119,30 @@ class TestRePairBuildDictionary(unittest.TestCase):
     alg = RePairGroupingAlgorithm()
 
     def test_empty_input_returns_empty(self):
-        self.assertEqual(self.alg.build_dictionary([], key_fn), [])
+        result = self.alg.group([], key_fn)
+        self.assertEqual(result.dictionary, [])
 
     def test_all_unique_returns_empty(self):
-        its     = items(["X", "Y", "Z"])
-        entries = self.alg.build_dictionary(its, key_fn)
-        self.assertEqual(entries, [])
+        its    = items(["X", "Y", "Z"])
+        result = self.alg.group(its, key_fn)
+        self.assertEqual(result.dictionary, [])
 
     def test_returns_dict_entry_objects(self):
-        its     = items(["A", "B", "A", "B"])
-        entries = self.alg.build_dictionary(its, key_fn)
-        for e in entries:
+        its    = items(["A", "B", "A", "B"])
+        result = self.alg.group(its, key_fn)
+        for e in result.dictionary:
             self.assertIsInstance(e, DictionaryEntry)
 
     def test_sorted_by_repeat_count_desc(self):
-        its     = items(["A", "B", "C"] * 4)
-        entries = self.alg.build_dictionary(its, key_fn)
-        counts  = [e.repeat_count for e in entries]
+        its    = items(["A", "B", "C"] * 4)
+        result = self.alg.group(its, key_fn)
+        counts = [e.repeat_count for e in result.dictionary]
         self.assertEqual(counts, sorted(counts, reverse=True))
 
     def test_entry_id_format(self):
-        its     = items(["A", "B", "A", "B"])
-        entries = self.alg.build_dictionary(its, key_fn)
-        for e in entries:
+        its    = items(["A", "B", "A", "B"])
+        result = self.alg.group(its, key_fn)
+        for e in result.dictionary:
             self.assertTrue(e.entry_id.startswith("key_"))
             parts = e.entry_id[4:].split("-")
             self.assertEqual(len(parts), 2)
@@ -150,39 +151,39 @@ class TestRePairBuildDictionary(unittest.TestCase):
             self.assertLessEqual(s, end)
 
     def test_key_sequence_contains_only_original_tokens(self):
-        its     = items(["A", "B", "C", "A", "B", "C"])
-        entries = self.alg.build_dictionary(its, key_fn)
-        for e in entries:
+        its    = items(["A", "B", "C", "A", "B", "C"])
+        result = self.alg.group(its, key_fn)
+        for e in result.dictionary:
             for sym in e.key_sequence:
                 self.assertIsInstance(sym, str)
                 self.assertIn(sym, {"A", "B", "C"})
 
     def test_two_token_rule_expanded(self):
         # [A,B] appears 3 times → rule R0 = A,B
-        its     = items(["A", "B"] * 3)
-        entries = self.alg.build_dictionary(its, key_fn)
-        seqs    = [list(e.key_sequence) for e in entries]
+        its    = items(["A", "B"] * 3)
+        result = self.alg.group(its, key_fn)
+        seqs   = [list(e.key_sequence) for e in result.dictionary]
         self.assertIn(["A", "B"], seqs)
 
     def test_nested_rule_fully_expanded(self):
         # [A,B,C] appears multiple times → inner rule [A,B] found first,
         # then outer rule [R0,C]; outer must expand to [A,B,C]
-        its     = items(["A", "B", "C"] * 4)
-        entries = self.alg.build_dictionary(its, key_fn)
-        seqs    = [list(e.key_sequence) for e in entries]
+        its    = items(["A", "B", "C"] * 4)
+        result = self.alg.group(its, key_fn)
+        seqs   = [list(e.key_sequence) for e in result.dictionary]
         self.assertIn(["A", "B", "C"], seqs)
 
     def test_repeat_count_at_least_2(self):
-        its     = items(["A", "B"] * 3)
-        entries = self.alg.build_dictionary(its, key_fn)
-        for e in entries:
+        its    = items(["A", "B"] * 3)
+        result = self.alg.group(its, key_fn)
+        for e in result.dictionary:
             self.assertGreaterEqual(e.repeat_count, 2)
 
     def test_entry_id_1indexed_first_occurrence(self):
         # [A,B] first appears at positions 0-1 → entry_id key_1-2
-        its     = items(["A", "B", "C", "A", "B"])
-        entries = self.alg.build_dictionary(its, key_fn)
-        ab_entry = next((e for e in entries if list(e.key_sequence) == ["A", "B"]), None)
+        its    = items(["A", "B", "C", "A", "B"])
+        result = self.alg.group(its, key_fn)
+        ab_entry = next((e for e in result.dictionary if list(e.key_sequence) == ["A", "B"]), None)
         self.assertIsNotNone(ab_entry)
         self.assertEqual(ab_entry.entry_id, "key_1-2")
 
@@ -230,13 +231,6 @@ class TestRePairPerformance10k(unittest.TestCase):
         alg.group(its, key_fn)
         return time.perf_counter() - t0
 
-    def _run_dict(self, keys: List[str]) -> float:
-        its = [{"k": k} for k in keys]
-        alg = RePairGroupingAlgorithm()
-        t0  = time.perf_counter()
-        alg.build_dictionary(its, key_fn)
-        return time.perf_counter() - t0
-
     def test_group_block_repeat(self):
         self._assert_fast(self._run_group(_make_block_repeat(self.N)))
 
@@ -245,15 +239,6 @@ class TestRePairPerformance10k(unittest.TestCase):
 
     def test_group_random_mixed(self):
         self._assert_fast(self._run_group(_make_random_mixed(self.N)))
-
-    def test_build_dict_block_repeat(self):
-        self._assert_fast(self._run_dict(_make_block_repeat(self.N)))
-
-    def test_build_dict_all_unique(self):
-        self._assert_fast(self._run_dict(_make_all_unique(self.N)))
-
-    def test_build_dict_random_mixed(self):
-        self._assert_fast(self._run_dict(_make_random_mixed(self.N)))
 
 
 class TestRePairPerformance100k(TestRePairPerformance10k):

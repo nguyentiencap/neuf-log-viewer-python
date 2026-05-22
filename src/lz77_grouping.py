@@ -20,6 +20,8 @@ group_similar_lines(items, key_fn, on_duplicate, min_match) -> List[Any]
 
 LZ77GroupingAlgorithm
     GroupingAlgorithm subclass that wraps group_similar_lines.
+    group() runs deduplication and collects the pattern dictionary in one pass,
+    returning a GroupingResult with both deduplicated items and dictionary.
 
 Internal helpers (exported for testability)
 -------------------------------------------
@@ -35,7 +37,7 @@ build_key_dict(window_keys, active_indices) -> Dict[str, List[int]]
 
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from .grouping_interface import DictionaryEntry, GroupingAlgorithm
+from .grouping_interface import DictionaryEntry, GroupingAlgorithm, GroupingResult
 
 _SEP = "\x00"
 
@@ -193,9 +195,6 @@ class LZ77GroupingAlgorithm(GroupingAlgorithm):
             Defaults to dropping duplicates (return None).
         min_match : int (default 1)
             Minimum block length to trigger on_duplicate.
-
-    build_dictionary() parameters (via **kwargs):
-        min_match : int (default 1)
     """
 
     def group(
@@ -205,55 +204,39 @@ class LZ77GroupingAlgorithm(GroupingAlgorithm):
         on_duplicate: Optional[Callable[[Any, int, int, int], Optional[Any]]] = None,
         min_match: int = 1,
         **kwargs,
-    ) -> List[Any]:
-        """Deduplicate items using the LZ77 engine."""
-        def _default_on_duplicate(item, dup_pos, match_start, match_len):
-            return None
-
-        effective_on_duplicate = on_duplicate if on_duplicate is not None else _default_on_duplicate
-        return group_similar_lines(
-            items        = items,
-            key_fn       = key_fn,
-            on_duplicate = effective_on_duplicate,
-            min_match    = min_match,
-        )
-
-    def build_dictionary(
-        self,
-        items: List[Any],
-        key_fn: Callable[[Any], str],
-        min_match: int = 1,
-        **kwargs,
-    ) -> List[DictionaryEntry]:
+    ) -> GroupingResult:
         """
-        Run LZ77 and collect every duplicate block as a DictionaryEntry.
+        Deduplicate items and collect the pattern dictionary in a single pass.
 
-        entry_id     = "key_{match_start+1}-{match_start+match_len}"  (1-indexed)
-        key_sequence = keys[match_start : match_start + match_len]
-        repeat_count = total occurrences (original + duplicate matches)
+        Returns a GroupingResult containing both the deduplicated item list
+        and the pattern dictionary (sorted by repeat_count DESC).
         """
         if not items:
-            return []
+            return GroupingResult(deduplicated=[], dictionary=[])
 
         keys    = [key_fn(item) for item in items]
         counts: Dict[Tuple[str, ...], int] = {}
 
-        def _collect(item, dup_pos, match_start, match_len):
+        def _default_on_duplicate(item, dup_pos, match_start, match_len):
+            return None
+
+        effective_on_duplicate = on_duplicate if on_duplicate is not None else _default_on_duplicate
+
+        def _collecting_on_duplicate(item, dup_pos, match_start, match_len):
             block = tuple(keys[match_start: match_start + match_len])
             counts[block] = counts.get(block, 0) + 1
-            return None  # always drop; we only collect here
+            return effective_on_duplicate(item, dup_pos, match_start, match_len)
 
-        group_similar_lines(
+        deduplicated = group_similar_lines(
             items        = items,
             key_fn       = key_fn,
-            on_duplicate = _collect,
+            on_duplicate = _collecting_on_duplicate,
             min_match    = min_match,
         )
 
         entries: List[DictionaryEntry] = []
         seen: Set[Tuple[str, ...]] = set()
 
-        # Scan the original keys to find the first occurrence of each block
         for block, count in counts.items():
             if block in seen:
                 continue
@@ -262,7 +245,7 @@ class LZ77GroupingAlgorithm(GroupingAlgorithm):
             start_line = 1
             for i in range(len(keys) - plen + 1):
                 if tuple(keys[i: i + plen]) == block:
-                    start_line = i + 1          # 1-indexed
+                    start_line = i + 1      # 1-indexed
                     break
             end_line = start_line + plen - 1
             entries.append(DictionaryEntry(
@@ -272,4 +255,4 @@ class LZ77GroupingAlgorithm(GroupingAlgorithm):
             ))
 
         entries.sort(key=lambda e: e.repeat_count, reverse=True)
-        return entries
+        return GroupingResult(deduplicated=deduplicated, dictionary=entries)

@@ -12,15 +12,19 @@ DictionaryEntry
     key_sequence : List[str]  — fully-expanded sequence of original keys
     repeat_count : int   — how many times the pattern was found repeated
 
-GroupingAlgorithm (ABC)
-    group(items, key_fn, **kwargs) -> List[Any]
-        Deduplicate / annotate a list of items.
+GroupingResult
+    Combined result returned by group().
 
-    build_dictionary(items, key_fn, **kwargs) -> List[DictionaryEntry]
-        Return repeated patterns sorted by repeat_count DESC.
+    deduplicated : List[Any]            — items with duplicates removed/collapsed
+    dictionary   : List[DictionaryEntry] — repeated patterns sorted by repeat_count DESC
+
+GroupingAlgorithm (ABC)
+    group(items, key_fn, **kwargs) -> GroupingResult
+        Deduplicate / annotate a list of items and build the pattern dictionary
+        in a single pass, returning both as a GroupingResult.
 
     export_dictionary(items, key_fn, output_path, **kwargs) -> None
-        Call build_dictionary and serialise the result as a JSON file.
+        Call group() and serialise the dictionary part as a JSON file.
         JSON schema:
         [
           {
@@ -35,7 +39,7 @@ GroupingAlgorithm (ABC)
 
 import json
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any, Callable, List
 
 
@@ -65,6 +69,22 @@ class DictionaryEntry:
 
 
 # ---------------------------------------------------------------------------
+# GroupingResult
+# ---------------------------------------------------------------------------
+
+@dataclass
+class GroupingResult:
+    """
+    Combined result returned by GroupingAlgorithm.group().
+
+    deduplicated — items with duplicates removed or collapsed
+    dictionary   — repeated patterns sorted by repeat_count DESC
+    """
+    deduplicated: List[Any]
+    dictionary:   List[DictionaryEntry]
+
+
+# ---------------------------------------------------------------------------
 # GroupingAlgorithm
 # ---------------------------------------------------------------------------
 
@@ -72,7 +92,10 @@ class GroupingAlgorithm(ABC):
     """
     Abstract base class for grouping/deduplication algorithms.
 
-    Concrete subclasses must implement `group` and `build_dictionary`.
+    Concrete subclasses must implement `group`, which returns a GroupingResult
+    containing both the deduplicated item list and the pattern dictionary in
+    a single pass.
+
     `export_dictionary` is provided as a non-abstract convenience method.
     """
 
@@ -82,31 +105,13 @@ class GroupingAlgorithm(ABC):
         items: List[Any],
         key_fn: Callable[[Any], str],
         **kwargs,
-    ) -> List[Any]:
+    ) -> GroupingResult:
         """
-        Deduplicate / annotate a list of items.
+        Deduplicate / annotate a list of items and build the pattern dictionary.
 
         @param items:   Any list of items.
         @param key_fn:  item -> str fingerprint extractor.
-        @returns:       Processed list (duplicates removed or collapsed).
-        """
-
-    @abstractmethod
-    def build_dictionary(
-        self,
-        items: List[Any],
-        key_fn: Callable[[Any], str],
-        **kwargs,
-    ) -> List[DictionaryEntry]:
-        """
-        Identify all repeated patterns in *items* and return them as a sorted
-        list of DictionaryEntry objects.
-
-        Entries are sorted by repeat_count DESC.
-
-        @param items:   Any list of items.
-        @param key_fn:  item -> str fingerprint extractor.
-        @returns:       List of DictionaryEntry, sorted by repeat_count DESC.
+        @returns:       GroupingResult with deduplicated items and dictionary.
         """
 
     def export_dictionary(
@@ -117,7 +122,7 @@ class GroupingAlgorithm(ABC):
         **kwargs,
     ) -> None:
         """
-        Build the pattern dictionary and write it to *output_path* as JSON.
+        Run group() and write the dictionary part to *output_path* as JSON.
 
         The file will contain a JSON array of objects:
           [{"entry_id": "key_1-2", "key_sequence": [...], "repeat_count": N}, ...]
@@ -126,7 +131,7 @@ class GroupingAlgorithm(ABC):
         @param key_fn:      item -> str fingerprint extractor.
         @param output_path: Destination path for the .json file.
         """
-        entries = self.build_dictionary(items, key_fn, **kwargs)
-        data = [e.to_dict() for e in entries]
+        result = self.group(items, key_fn, **kwargs)
+        data = [e.to_dict() for e in result.dictionary]
         with open(output_path, "w", encoding="utf-8") as fh:
             json.dump(data, fh, ensure_ascii=False, indent=2)
