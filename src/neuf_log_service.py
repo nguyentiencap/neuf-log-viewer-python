@@ -553,10 +553,12 @@ class NEUFLogService:
 
     def apply_dedup_filter(self, logs, dedup_mode):
         """
-        Apply in-memory duplicate filtering to a list of log rows.
+        Apply duplicate filtering to a list of log rows using the existing
+        LZ77 grouping engine (group_similar_lines).
 
-        Uses pre-computed (hash_lo, hash_hi) stored in each row to detect
-        duplicates in O(n) time with a hash-set lookup.
+        The grouping key is the pre-computed (hash_lo, hash_hi) stored in each
+        row — avoids re-hashing device_id + component_name + message at query
+        time.  Rows that lack a hash are always emitted unchanged.
 
         @param logs:       List of log-row dicts (as returned by filter_logs).
         @param dedup_mode: 'none'     — return logs unchanged.
@@ -568,28 +570,34 @@ class NEUFLogService:
         if not dedup_mode or dedup_mode == 'none':
             return logs
 
-        seen = {}   # (hash_lo, hash_hi) -> 1-indexed position of first occurrence
-        result = []
-        for i, log in enumerate(logs):
-            hash_lo = log.get('hash_lo')
-            hash_hi = log.get('hash_hi')
-            # Treat missing/null hashes as non-deduplicatable (always keep)
-            if hash_lo is None or hash_hi is None:
-                result.append(log)
-                continue
+        from .lz77_grouping import group_similar_lines
 
-            key = (hash_lo, hash_hi)
-            if key in seen:
-                if dedup_mode == 'annotate':
-                    modified = dict(log)
-                    modified['message'] = f"Giống dòng {seen[key]}"
-                    result.append(modified)
-                # 'skip': do not append
+        _NO_HASH_PREFIX = '__nohash__'
+        _seen_no_hash = [0]
+
+        def key_fn(log):
+            """Use pre-stored MD5 halves as string key; unique sentinel for null hashes."""
+            h_lo = log.get('hash_lo')
+            h_hi = log.get('hash_hi')
+            if h_lo is None or h_hi is None:
+                # Unique key per object so rows without a hash are never grouped
+                _seen_no_hash[0] += 1
+                return f"{_NO_HASH_PREFIX}{_seen_no_hash[0]}"
+            return f"{h_lo}\x00{h_hi}"
+
+        filter_duplicate = (dedup_mode == 'skip')
+
+        def on_duplicate(item, dup_pos, match_start, match_len):
+            if filter_duplicate:
+                return None
+            modified = dict(item)
+            if match_len == 1:
+                modified['message'] = f"Giống dòng {match_start + 1}"
             else:
-                seen[key] = i + 1   # 1-based position within this page/batch
-                result.append(log)
+                modified['message'] = f"Giống dòng {match_start + 1}-{match_start + match_len}"
+            return modified
 
-        return result
+        return group_similar_lines(logs, key_fn=key_fn, on_duplicate=on_duplicate, min_match=1)
 
     # ------------------------------------------------------------------ #
     #  Output formatting                                                    #
