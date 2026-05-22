@@ -14,6 +14,7 @@ from .log_parser import default_log_parser_service
 from .log_file_scanner import LogFileScannerService
 from .database import DatabaseWrapper, DatabaseService, DB_SCHEMA_VERSION
 from .preset import PresetService
+from .lz77_grouping import LZ77GroupingAlgorithm
 
 
 class NEUFLogService:
@@ -32,6 +33,7 @@ class NEUFLogService:
         self.logger          = logger
         self.sql_logger      = sql_logger
         self.scanner_service = LogFileScannerService(default_log_parser_service, logger)
+        self.grouping_algorithm = LZ77GroupingAlgorithm()
 
     # ------------------------------------------------------------------ #
     #  SQL engine lifecycle (kept for API compatibility)                    #
@@ -553,10 +555,9 @@ class NEUFLogService:
 
     def apply_dedup_filter(self, logs, dedup_mode):
         """
-        Apply duplicate filtering to a list of log rows using the existing
-        LZ77 grouping engine (group_similar_lines).
+        Apply duplicate filtering to a list of log rows using GroupingAlgorithm.
 
-        The grouping key is the pre-computed (hash_lo, hash_hi) stored in each
+        The grouping key is the pre-computed (hash_hi << 64 | hash_lo) stored in each
         row — avoids re-hashing device_id + component_name + message at query
         time.  Rows that lack a hash are always emitted unchanged.
 
@@ -570,20 +571,19 @@ class NEUFLogService:
         if not dedup_mode or dedup_mode == 'none':
             return logs
 
-        from .lz77_grouping import group_similar_lines
-
         _NO_HASH_PREFIX = '__nohash__'
         _seen_no_hash = [0]
+        _mask_64 = (1 << 64) - 1
 
         def key_fn(log):
-            """Use pre-stored MD5 halves as string key; unique sentinel for null hashes."""
+            """Use reconstructed MD5 integer key; unique sentinel for null hashes."""
             h_lo = log.get('hash_lo')
             h_hi = log.get('hash_hi')
             if h_lo is None or h_hi is None:
                 # Unique key per object so rows without a hash are never grouped
                 _seen_no_hash[0] += 1
                 return f"{_NO_HASH_PREFIX}{_seen_no_hash[0]}"
-            return f"{h_lo}\x00{h_hi}"
+            return ((h_hi & _mask_64) << 64) | (h_lo & _mask_64)
 
         filter_duplicate = (dedup_mode == 'skip')
 
@@ -597,7 +597,13 @@ class NEUFLogService:
                 modified['message'] = f"Giống dòng {match_start + 1}-{match_start + match_len}"
             return modified
 
-        return group_similar_lines(logs, key_fn=key_fn, on_duplicate=on_duplicate, min_match=1)
+        result = self.grouping_algorithm.group(
+            logs,
+            key_fn=key_fn,
+            on_duplicate=on_duplicate,
+            min_match=1,
+        )
+        return result.deduplicated
 
     # ------------------------------------------------------------------ #
     #  Output formatting                                                    #
