@@ -33,12 +33,12 @@ Public API
 ----------
 RePairGroupingAlgorithm
     .group(items, key_fn, **kwargs)              -> GroupingResult
-    .export_dictionary(items, key_fn, path, ...) -> None  (inherited)
+    .export_dictionary(items, key_fn, output_path, ...) -> None  (inherited)
 """
 
 import heapq
 from collections import defaultdict
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 
 from .grouping_interface import DictionaryEntry, GroupingAlgorithm, GroupingResult
 
@@ -311,6 +311,10 @@ class RePairGroupingAlgorithm(GroupingAlgorithm):
         for rule_idx, ((left, right, freq), exp) in enumerate(
             zip(rules, expanded_rules)
         ):
+            actual_count = len(rule_all_starts[rule_idx])
+            if actual_count < 2:
+                continue
+
             first_0    = rule_first_pos[rule_idx]   # 0-indexed start
             start_line = first_0 + 1                # 1-indexed
             end_line   = first_0 + len(exp)         # 1-indexed inclusive
@@ -318,7 +322,7 @@ class RePairGroupingAlgorithm(GroupingAlgorithm):
             entries.append(DictionaryEntry(
                 entry_id     = f"key_{start_line}-{end_line}",
                 key_sequence = tuple(exp),
-                repeat_count = freq,
+                repeat_count = actual_count,
                 occurrences  = tuple(s + 1 for s in rule_all_starts[rule_idx]),
             ))
 

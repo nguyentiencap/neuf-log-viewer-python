@@ -43,7 +43,7 @@ GroupingAlgorithm (ABC)
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Callable, List
+from typing import Any, Callable, List, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -61,9 +61,9 @@ class DictionaryEntry:
     occurrences   — 1-indexed start positions of every occurrence, sorted ascending
     """
     entry_id:     str
-    key_sequence: tuple          # immutable; serialised as list
+    key_sequence: Tuple[str, ...]          # immutable; serialised as list
     repeat_count: int
-    occurrences:  tuple = ()     # immutable; serialised as list; default empty for compat
+    occurrences:  Tuple[int, ...] = ()     # immutable; serialised as list; default empty for compat
 
     def to_dict(self) -> dict:
         return {
