@@ -418,7 +418,7 @@ class NEUFLogService:
         options = options or {}
         return {
             'page':     options.get('page', 1),
-            'pageSize': options.get('pageSize', 1000),
+            'pageSize': options.get('pageSize', 2000),
         }
 
     def _get_output_table_count(self, database_service, output_table):
@@ -546,6 +546,50 @@ class NEUFLogService:
         count = len(install_presets)
         self.logger(f'💡 Created {count} install presets.')
         return {'success': True, 'count': count}
+
+    # ------------------------------------------------------------------ #
+    #  Duplicate filtering                                                  #
+    # ------------------------------------------------------------------ #
+
+    def apply_dedup_filter(self, logs, dedup_mode):
+        """
+        Apply in-memory duplicate filtering to a list of log rows.
+
+        Uses pre-computed (hash_lo, hash_hi) stored in each row to detect
+        duplicates in O(n) time with a hash-set lookup.
+
+        @param logs:       List of log-row dicts (as returned by filter_logs).
+        @param dedup_mode: 'none'     — return logs unchanged.
+                           'annotate' — replace duplicate message with
+                                        "Giống dòng {first_occurrence_1indexed}".
+                           'skip'     — drop duplicate rows entirely.
+        @returns: Filtered/annotated list of log-row dicts.
+        """
+        if not dedup_mode or dedup_mode == 'none':
+            return logs
+
+        seen = {}   # (hash_lo, hash_hi) -> 1-indexed position of first occurrence
+        result = []
+        for i, log in enumerate(logs):
+            hash_lo = log.get('hash_lo')
+            hash_hi = log.get('hash_hi')
+            # Treat missing/null hashes as non-deduplicatable (always keep)
+            if hash_lo is None or hash_hi is None:
+                result.append(log)
+                continue
+
+            key = (hash_lo, hash_hi)
+            if key in seen:
+                if dedup_mode == 'annotate':
+                    modified = dict(log)
+                    modified['message'] = f"Giống dòng {seen[key]}"
+                    result.append(modified)
+                # 'skip': do not append
+            else:
+                seen[key] = i + 1   # 1-based position within this page/batch
+                result.append(log)
+
+        return result
 
     # ------------------------------------------------------------------ #
     #  Output formatting                                                    #
