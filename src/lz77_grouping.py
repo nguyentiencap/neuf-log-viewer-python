@@ -207,13 +207,14 @@ class LZ77GroupingAlgorithm(GroupingAlgorithm):
         **kwargs,
     ) -> List[Any]:
         """Deduplicate items using the LZ77 engine."""
-        if on_duplicate is None:
-            def on_duplicate(item, dup_pos, match_start, match_len):  # noqa: F811
-                return None
+        def _default_on_duplicate(item, dup_pos, match_start, match_len):
+            return None
+
+        effective_on_duplicate = on_duplicate if on_duplicate is not None else _default_on_duplicate
         return group_similar_lines(
             items        = items,
             key_fn       = key_fn,
-            on_duplicate = on_duplicate,
+            on_duplicate = effective_on_duplicate,
             min_match    = min_match,
         )
 
