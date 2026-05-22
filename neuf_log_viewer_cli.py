@@ -44,6 +44,8 @@ VALID_OPTIONS = [
     'search',
     'time-from',
     'time-to',
+    'scan-from',
+    'scan-to',
     'context',
     'page',
     'page-size',
@@ -76,13 +78,17 @@ Filter options:
   --level           <lvl>    Include log level: ERROR|WARN|INFO|DEBUG. Repeatable.
   --component       <name>   Include logs from this component. Repeatable.
   --exclude-component <name> Exclude logs from this component. Repeatable.
-  --search          <text>   Search for text or regex in the log message.
-                             Supports regex! Examples:
-                             --search "Exception|Error"
-                             --search "ERROR.*Connection"
-  --time-from       <ts>     Start timestamp (YYYY.MM.DD HH:mm:ss).
-  --time-to         <ts>     End  timestamp (YYYY.MM.DD HH:mm:ss).
-  --context         <n>      Show n lines of context around each search match.
+   --search          <text>   Search for text or regex in the log message.
+                              Supports regex! Examples:
+                              --search "Exception|Error"
+                              --search "ERROR.*Connection"
+   --time-from       <ts>     Start timestamp (YYYY.MM.DD HH:mm:ss).
+   --time-to         <ts>     End  timestamp (YYYY.MM.DD HH:mm:ss).
+   --scan-from       <ts>     Scan only log entries on or after this timestamp.
+                              Entries outside this range are ignored during indexing.
+   --scan-to         <ts>     Scan only log entries on or before this timestamp.
+                              Entries outside this range are ignored during indexing.
+   --context         <n>      Show n lines of context around each search match.
   --page            <n>      Page number for batch reading (default: 1).
   --page-size       <n>      Logs per page (default: 200).
   --format          <fmt>    Output format: text | compact | json (default: text).
@@ -251,7 +257,7 @@ def validate_options(command, opts):
         )
 
     # Timestamps
-    for key in ('time-from', 'time-to'):
+    for key in ('time-from', 'time-to', 'scan-from', 'scan-to'):
         if opts.get(key) and not is_valid_timestamp(opts[key]):
             errors.append(
                 f'❌ Invalid --{key} "{opts[key]}". Expected format: YYYY.MM.DD HH:mm:ss\n'
@@ -345,7 +351,7 @@ def _print_pagination_info(result):
 # Commands
 # ---------------------------------------------------------------------------
 
-async def ensure_database(folder, log_service):
+async def ensure_database(folder, log_service, scan_time_from=None, scan_time_to=None):
     """
     Ensure the database is indexed for the given folder.
     Writes status to stderr so stdout stays clean (e.g. for JSON output).
@@ -355,7 +361,8 @@ async def ensure_database(folder, log_service):
 
     sys.stderr.write(f'📁 Indexing logs in: {folder}\n')
     try:
-        result = await log_service.scan_logs(folder)
+        result = await log_service.scan_logs(folder, scan_time_from=scan_time_from,
+                                             scan_time_to=scan_time_to)
         sys.stderr.write(
             f"✅ Indexed {result['data']['totalLogs']} log entries"
             f" from {result['data']['filesScanned']} file(s).\n\n"
@@ -365,10 +372,21 @@ async def ensure_database(folder, log_service):
         sys.exit(1)
 
 
+async def warn_if_scan_meta(folder, log_service):
+    """Print a warning to stderr if the database was scanned with a time range restriction."""
+    scan_meta = await log_service.get_db_scan_meta(folder)
+    warning = log_service.build_scan_meta_warning(scan_meta)
+    if warning:
+        sys.stderr.write(f'\n{warning}\n\n')
+
+
 async def cmd_presets(folder, _opts, log_service):
     """List all available presets for the given log folder."""
     await log_service.initialize()
-    await ensure_database(folder, log_service)
+    await ensure_database(folder, log_service,
+                          scan_time_from=_opts.get('scan-from'),
+                          scan_time_to=_opts.get('scan-to'))
+    await warn_if_scan_meta(folder, log_service)
 
     result = await log_service.get_preset_suggestions(folder)
 
@@ -396,7 +414,10 @@ async def cmd_presets(folder, _opts, log_service):
 async def cmd_filter(folder, opts, log_service):
     """Filter logs and print results."""
     await log_service.initialize()
-    await ensure_database(folder, log_service)
+    await ensure_database(folder, log_service,
+                          scan_time_from=opts.get('scan-from'),
+                          scan_time_to=opts.get('scan-to'))
+    await warn_if_scan_meta(folder, log_service)
 
     filters = build_filters(opts)
     normalized = log_service.normalize_filters(filters)

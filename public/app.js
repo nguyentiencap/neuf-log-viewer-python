@@ -136,6 +136,25 @@
       method: 'GET',
       success: function(response) {
         if (response.databaseScanned) {
+          // Show persistent banner if DB was built with a scan time range restriction
+          var scanMeta = response.scanMeta || {};
+          var timeFrom = scanMeta.scanTimeFrom;
+          var timeTo   = scanMeta.scanTimeTo;
+          if (timeFrom || timeTo) {
+            var rangeStr;
+            if (timeFrom && timeTo) {
+              rangeStr = 'from ' + timeFrom + ' to ' + timeTo;
+            } else if (timeFrom) {
+              rangeStr = 'from ' + timeFrom + ' onwards';
+            } else {
+              rangeStr = 'up to ' + timeTo;
+            }
+            var msg = '⚠️ This database only contains logs ' + rangeStr +
+                      '. To include more logs, delete the database and re-scan.';
+            $('#scanRangeBanner').text(msg).show();
+            // Offset the main layout to accommodate the banner
+            $('body').css('padding-top', $('#scanRangeBanner').outerHeight() + 'px');
+          }
           loadLogs();
           loadPresetSuggestions();
         } else {

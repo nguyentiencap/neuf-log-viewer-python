@@ -317,6 +317,31 @@ class DatabaseService:
         except Exception:
             return None
 
+    def save_scan_meta(self, scan_time_from, scan_time_to):
+        """Persist scan time range into schema_meta. None values are stored as empty string."""
+        self.db.prepare(
+            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('scan_time_from', ?)"
+        ).run(scan_time_from or '')
+        self.db.prepare(
+            "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('scan_time_to', ?)"
+        ).run(scan_time_to or '')
+
+    def get_scan_meta(self):
+        """Return scan time range metadata dict with keys scanTimeFrom/scanTimeTo (str or None)."""
+        try:
+            row_from = self.db.prepare(
+                "SELECT value FROM schema_meta WHERE key = 'scan_time_from'"
+            ).get()
+            row_to = self.db.prepare(
+                "SELECT value FROM schema_meta WHERE key = 'scan_time_to'"
+            ).get()
+            return {
+                'scanTimeFrom': (row_from['value'] or None) if row_from else None,
+                'scanTimeTo':   (row_to['value']   or None) if row_to   else None,
+            }
+        except Exception:
+            return {'scanTimeFrom': None, 'scanTimeTo': None}
+
     # ------------------------------------------------------------------ #
     #  Schema management                                                    #
     # ------------------------------------------------------------------ #

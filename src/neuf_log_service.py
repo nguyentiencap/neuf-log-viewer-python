@@ -151,9 +151,37 @@ class NEUFLogService:
         # Enable sql_logger only on the query-time connection
         result = self._create_database_service(conn, self.sql_logger)
         result['dbPath'] = db_path
+        # Attach scan time range metadata so callers can surface it to users
+        result['scanMeta'] = result['databaseService'].get_scan_meta()
 
         NEUFLogService._db_cache[resolved] = result
         return result
+
+    async def get_db_scan_meta(self, folder_path):
+        """Return scan meta dict {scanTimeFrom, scanTimeTo} for an existing database, or all None."""
+        try:
+            cached = await self.load_database(folder_path)
+            return cached.get('scanMeta', {'scanTimeFrom': None, 'scanTimeTo': None})
+        except Exception:
+            return {'scanTimeFrom': None, 'scanTimeTo': None}
+
+    @staticmethod
+    def build_scan_meta_warning(scan_meta):
+        """Build a user-facing warning string from scan meta dict, or None if no restriction."""
+        time_from = scan_meta.get('scanTimeFrom')
+        time_to   = scan_meta.get('scanTimeTo')
+        if not time_from and not time_to:
+            return None
+        if time_from and time_to:
+            range_str = f'from {time_from} to {time_to}'
+        elif time_from:
+            range_str = f'from {time_from} onwards'
+        else:
+            range_str = f'up to {time_to}'
+        return (
+            f'⚠️  This database only contains logs {range_str}. '
+            f'To include more logs, delete the database and re-scan.'
+        )
 
     def _create_already_scanned_result(self, db_path, log_folder_path):
         return {
@@ -198,8 +226,12 @@ class NEUFLogService:
             os.unlink(db_path)
             self.logger(f'🗑️  Removed empty database: {db_path}')
 
-    async def scan_logs(self, folder_path):
-        """Scan NEUF-*.log files and create indexed SQLite database."""
+    async def scan_logs(self, folder_path, scan_time_from=None, scan_time_to=None):
+        """Scan NEUF-*.log files and create indexed SQLite database.
+
+        @param scan_time_from: Optional timestamp string (YYYY.MM.DD HH:mm:ss) — skip entries before
+        @param scan_time_to:   Optional timestamp string (YYYY.MM.DD HH:mm:ss) — skip entries after
+        """
         paths = self.get_db_path(folder_path)
         log_folder_path = paths['logFolderPath']
         db_path         = paths['dbPath']
@@ -230,6 +262,19 @@ class NEUFLogService:
 
         self.logger('📊 Scanning and indexing logs...')
 
+        # Log scan time range if specified
+        if scan_time_from or scan_time_to:
+            range_parts = []
+            if scan_time_from:
+                range_parts.append(f'from {scan_time_from}')
+            if scan_time_to:
+                range_parts.append(f'to {scan_time_to}')
+            self.logger(f'⏰ Scan time range: {", ".join(range_parts)}')
+
+        # Convert time range strings to unix timestamps for scanner filtering
+        scan_time_from_unix = self.parser_service.get_time_bucket(scan_time_from) if scan_time_from else None
+        scan_time_to_unix   = self.parser_service.get_time_bucket(scan_time_to)   if scan_time_to   else None
+
         # Fail fast if no log files
         log_files = self.scanner_service.find_neuf_log_files(log_folder_path)
         files_scanned = len(log_files)
@@ -257,6 +302,8 @@ class NEUFLogService:
             log_folder_path,
             lambda batch: insert_many_temp(batch),
             log_files,
+            scan_time_from=scan_time_from_unix,
+            scan_time_to=scan_time_to_unix,
         )
         total_logs  = parse_result['totalEntries']
         file_stats  = parse_result.get('fileStats', [])
@@ -283,6 +330,10 @@ class NEUFLogService:
         database_service.insert_from_temp_to_logs()
         database_service.drop_temp_logs_table()
         self.logger(f'✅ Inserted {total_logs:,} entries into logs table.')
+
+        # Save scan time range metadata so users can detect a partial-range DB
+        if scan_time_from or scan_time_to:
+            database_service.save_scan_meta(scan_time_from, scan_time_to)
 
         os.makedirs(db_dir, exist_ok=True)
 

@@ -43,13 +43,16 @@ class LogFileScannerService:
             self.logger(f'  Warning: Cannot read directory {directory}: {e}')
         return sorted(files)
 
-    async def parse_files(self, log_folder_path, on_batch_ready, precomputed_files=None):
+    async def parse_files(self, log_folder_path, on_batch_ready, precomputed_files=None,
+                          scan_time_from=None, scan_time_to=None):
         """
         Scan all log files, parse each line, deliver batches via callback.
 
         @param log_folder_path: Path to log folder
         @param on_batch_ready: Callable(batch: list[dict])
         @param precomputed_files: Optional pre-computed file list
+        @param scan_time_from: Unix timestamp (int) — skip entries before this time
+        @param scan_time_to:   Unix timestamp (int) — skip entries after this time
         @returns: Dict { 'totalEntries': int, 'fileStats': [...] }
         """
         self.logger(f'🔍 Scanning log folder: {log_folder_path}')
@@ -97,13 +100,18 @@ class LogFileScannerService:
                                 current_entry['filename']
                             )
                             if log_obj is not None:
-                                batch.append(log_obj)
-                                total_entries  += 1
-                                file_entries   += 1
+                                tb = log_obj.get('timeBucket')
+                                if (scan_time_from is not None and tb is not None and tb < scan_time_from) or \
+                                   (scan_time_to   is not None and tb is not None and tb > scan_time_to):
+                                    pass  # outside requested time range — skip
+                                else:
+                                    batch.append(log_obj)
+                                    total_entries  += 1
+                                    file_entries   += 1
 
-                                if len(batch) >= batch_size:
-                                    on_batch_ready(batch)
-                                    batch = []
+                                    if len(batch) >= batch_size:
+                                        on_batch_ready(batch)
+                                        batch = []
 
                         raw_content = line[len(line_start['timestamp']):].strip()
                         current_entry = {
@@ -123,9 +131,14 @@ class LogFileScannerService:
                     current_entry['filename']
                 )
                 if log_obj is not None:
-                    batch.append(log_obj)
-                    total_entries  += 1
-                    file_entries   += 1
+                    tb = log_obj.get('timeBucket')
+                    if (scan_time_from is not None and tb is not None and tb < scan_time_from) or \
+                       (scan_time_to   is not None and tb is not None and tb > scan_time_to):
+                        pass  # outside requested time range — skip
+                    else:
+                        batch.append(log_obj)
+                        total_entries  += 1
+                        file_entries   += 1
 
             self.logger(f'  ✅ {file_lines} lines / {file_entries} entries.')
             file_stats.append({

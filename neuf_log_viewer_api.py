@@ -178,12 +178,15 @@ def create_app(folder_path: str, log_service=None) -> FastAPI:
     @app.get('/health')
     async def health():
         scanned = log_service.is_database_scanned(folder_path)
+        scan_meta = await log_service.get_db_scan_meta(folder_path) if scanned else \
+                    {'scanTimeFrom': None, 'scanTimeTo': None}
         return JSONResponse({
             'success': True,
             'status': 'healthy',
             'version': '1.0.0',
             'databaseScanned': scanned,
             'folderPath': folder_path,
+            'scanMeta': scan_meta,
         })
 
     # -----------------------------------------------------------------------
@@ -355,11 +358,25 @@ async def _main():
     args = sys.argv[1:]
     if not args:
         sys.stderr.write('❌ Error: Folder path is required\n')
-        sys.stderr.write('Usage: python neuf_log_viewer_api.py <folderPath>\n')
+        sys.stderr.write('Usage: python neuf_log_viewer_api.py <folderPath> [--scan-from <ts>] [--scan-to <ts>]\n')
         sys.exit(1)
 
     folder_arg = args[0]
     folder_path = os.path.realpath(os.path.abspath(folder_arg))
+
+    # Parse optional --scan-from / --scan-to args
+    scan_time_from = None
+    scan_time_to   = None
+    i = 1
+    while i < len(args):
+        if args[i] == '--scan-from' and i + 1 < len(args):
+            scan_time_from = args[i + 1]
+            i += 2
+        elif args[i] == '--scan-to' and i + 1 < len(args):
+            scan_time_to = args[i + 1]
+            i += 2
+        else:
+            i += 1
 
     if not os.path.exists(folder_path):
         sys.stderr.write(f'❌ Error: Folder path does not exist: {folder_path}\n')
@@ -376,7 +393,9 @@ async def _main():
 
     print('\n🔍 Scanning logs...')
     try:
-        scan_result = await log_service.scan_logs(folder_path)
+        scan_result = await log_service.scan_logs(folder_path,
+                                                   scan_time_from=scan_time_from,
+                                                   scan_time_to=scan_time_to)
     except Exception as scan_err:
         sys.stderr.write(f'\n❌ Failed to scan logs:\n{scan_err}\n')
         sys.exit(1)
@@ -388,6 +407,12 @@ async def _main():
     else:
         sys.stderr.write(f"❌ Failed to scan logs: {scan_result.get('error')}\n")
         sys.exit(1)
+
+    # Print scan range warning on startup if applicable
+    scan_meta = await log_service.get_db_scan_meta(folder_path)
+    scan_meta_warning = NEUFLogService.build_scan_meta_warning(scan_meta)
+    if scan_meta_warning:
+        print(f'\n{scan_meta_warning}\n')
 
     base_port = int(os.environ.get('PORT', '3001'))
     max_attempts = 10
