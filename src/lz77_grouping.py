@@ -18,6 +18,9 @@ group_similar_lines(items, key_fn, on_duplicate, min_match) -> List[Any]
     min_match : int (default 1)
         Minimum block length to trigger on_duplicate.
 
+LZ77GroupingAlgorithm
+    GroupingAlgorithm subclass that wraps group_similar_lines.
+
 Internal helpers (exported for testability)
 -------------------------------------------
 _find_longest_match(keys, pos, emitted_starts) -> (start, length) | None
@@ -31,6 +34,8 @@ build_key_dict(window_keys, active_indices) -> Dict[str, List[int]]
 """
 
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+
+from .grouping_interface import DictionaryEntry, GroupingAlgorithm
 
 _SEP = "\x00"
 
@@ -171,3 +176,99 @@ def group_similar_lines(
                 handled.add(i + offset)
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# LZ77GroupingAlgorithm — GroupingAlgorithm adapter
+# ---------------------------------------------------------------------------
+
+class LZ77GroupingAlgorithm(GroupingAlgorithm):
+    """
+    GroupingAlgorithm implementation backed by the LZ77-inspired engine.
+
+    group() parameters (via **kwargs):
+        on_duplicate : Callable[[Any, int, int, int], Optional[Any]]
+            Called for the first item of each duplicate block.
+            Return None to drop the block; return an item to insert a replacement.
+            Defaults to dropping duplicates (return None).
+        min_match : int (default 1)
+            Minimum block length to trigger on_duplicate.
+
+    build_dictionary() parameters (via **kwargs):
+        min_match : int (default 1)
+    """
+
+    def group(
+        self,
+        items: List[Any],
+        key_fn: Callable[[Any], str],
+        on_duplicate: Optional[Callable[[Any, int, int, int], Optional[Any]]] = None,
+        min_match: int = 1,
+        **kwargs,
+    ) -> List[Any]:
+        """Deduplicate items using the LZ77 engine."""
+        if on_duplicate is None:
+            def on_duplicate(item, dup_pos, match_start, match_len):  # noqa: F811
+                return None
+        return group_similar_lines(
+            items        = items,
+            key_fn       = key_fn,
+            on_duplicate = on_duplicate,
+            min_match    = min_match,
+        )
+
+    def build_dictionary(
+        self,
+        items: List[Any],
+        key_fn: Callable[[Any], str],
+        min_match: int = 1,
+        **kwargs,
+    ) -> List[DictionaryEntry]:
+        """
+        Run LZ77 and collect every duplicate block as a DictionaryEntry.
+
+        entry_id     = "key_{match_start+1}-{match_start+match_len}"  (1-indexed)
+        key_sequence = keys[match_start : match_start + match_len]
+        repeat_count = total occurrences (original + duplicate matches)
+        """
+        if not items:
+            return []
+
+        keys    = [key_fn(item) for item in items]
+        counts: Dict[Tuple[str, ...], int] = {}
+
+        def _collect(item, dup_pos, match_start, match_len):
+            block = tuple(keys[match_start: match_start + match_len])
+            counts[block] = counts.get(block, 0) + 1
+            return None  # always drop; we only collect here
+
+        group_similar_lines(
+            items        = items,
+            key_fn       = key_fn,
+            on_duplicate = _collect,
+            min_match    = min_match,
+        )
+
+        entries: List[DictionaryEntry] = []
+        seen: Set[Tuple[str, ...]] = set()
+
+        # Scan the original keys to find the first occurrence of each block
+        for block, count in counts.items():
+            if block in seen:
+                continue
+            seen.add(block)
+            plen = len(block)
+            start_line = 1
+            for i in range(len(keys) - plen + 1):
+                if tuple(keys[i: i + plen]) == block:
+                    start_line = i + 1          # 1-indexed
+                    break
+            end_line = start_line + plen - 1
+            entries.append(DictionaryEntry(
+                entry_id     = f"key_{start_line}-{end_line}",
+                key_sequence = block,
+                repeat_count = count + 1,   # +1 for the original occurrence
+            ))
+
+        entries.sort(key=lambda e: e.repeat_count, reverse=True)
+        return entries
