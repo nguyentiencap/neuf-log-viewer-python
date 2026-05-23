@@ -9,7 +9,7 @@
   // Application state
   const state = {
     currentPage: 1,
-    pageSize: 1000,
+    pageSize: 2000,
     totalPages: 1,
     total: 0,
     folderPath: './logs',
@@ -66,6 +66,12 @@
         jumpToPage();
       }
     });
+
+    // Dedup dropdown: reload current page when changed
+    $('#dedupSelect').on('change', function() {
+      state.currentPage = 1;
+      loadLogs();
+    });
   }
 
   /**
@@ -75,6 +81,7 @@
     const exportButton = $('#exportLogBtn');
     const requestFilters = buildRequestFilters();
     const exportFormat = $('#exportFormatSelect').val() || 'full';
+    const dedupMode = $('#dedupSelect').val() || 'annotate';
 
     exportButton.prop('disabled', true).text('Exporting...');
 
@@ -83,7 +90,7 @@
       headers: {
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ filters: requestFilters, format: exportFormat })
+      body: JSON.stringify({ filters: requestFilters, format: exportFormat, dedup: dedupMode })
     })
       .then(function(response) {
         if (!response.ok) {
@@ -473,6 +480,7 @@
 
   function loadLogs(pageOnly) {
     const requestFilters = buildRequestFilters();
+    const dedupMode = $('#dedupSelect').val() || 'annotate';
 
     $.ajax({
       url: API_BASE + '/filter_log',
@@ -482,7 +490,8 @@
         filters: requestFilters,
         page: state.currentPage,
         pageSize: state.pageSize,
-        inputTable: state.inputTable
+        inputTable: state.inputTable,
+        dedup: dedupMode
       }),
       success: function(response) {
         console.log('[loadLogs] success, response.success=', response.success, 'pageOnly=', pageOnly, 'outputTable=', response.outputTable);

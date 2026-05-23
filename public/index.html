@@ -20,6 +20,14 @@
       <label class="show-all-label">
         <input type="checkbox" id="showAllCheckbox"> Show all (expand log entries)
       </label>
+      <label class="show-all-label" for="dedupSelect">
+        Duplicate filter:
+        <select id="dedupSelect">
+          <option value="annotate" selected>Show "Same as line"</option>
+          <option value="skip">Skip duplicate lines</option>
+          <option value="none">None (show all)</option>
+        </select>
+      </label>
       <label class="show-all-label" for="exportFormatSelect">
         Export format:
         <select id="exportFormatSelect">

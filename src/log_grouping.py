@@ -51,9 +51,9 @@ def _make_neuf_on_duplicate(filter_duplicate: bool):
             return None
         modified = dict(item)
         if match_len == 1:
-            modified["message"] = f"Same as line {match_start + 1}"
+            modified["message"] = f"Giống dòng {match_start + 1}"
         else:
-            modified["message"] = f"Same as line {match_start + 1}-{match_start + match_len}"
+            modified["message"] = f"Giống dòng {match_start + 1}-{match_start + match_len}"
         return modified
 
     return on_duplicate

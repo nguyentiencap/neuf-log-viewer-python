@@ -5,15 +5,30 @@ Responsibility: Database abstraction and all SQL operations.
 Note: Uses Python's built-in sqlite3 module instead of sql.js.
 """
 
+import hashlib
 import re
 import sqlite3
+import struct
 import time
 
 from .log_parser import log_parser_service
 
 # Bump this value whenever the database schema changes.
 # load_database will auto-clear any DB whose stored version differs.
-DB_SCHEMA_VERSION = 2
+DB_SCHEMA_VERSION = 3
+
+
+def compute_hash_lo_hi(device_id, component_name, message):
+    """
+    Compute MD5 of (device_id + '\\0' + component_name + '\\0' + message).
+    Returns (hash_lo, hash_hi) as two signed 64-bit integers (big-endian).
+    Storing as two INT8 columns allows fast equality-join deduplication.
+    """
+    key = f"{device_id or ''}\x00{component_name or ''}\x00{message or ''}"
+    digest = hashlib.md5(key.encode('utf-8')).digest()
+    hash_lo = struct.unpack_from('>q', digest, 0)[0]
+    hash_hi = struct.unpack_from('>q', digest, 8)[0]
+    return hash_lo, hash_hi
 
 
 class _Statement:
@@ -381,7 +396,9 @@ class DatabaseService:
                 component_id INTEGER          REFERENCES components(id),
                 log_level_id INTEGER          REFERENCES log_levels(id),
                 time_bucket  INTEGER,
-                message      TEXT    NOT NULL
+                message      TEXT    NOT NULL,
+                hash_lo      INTEGER,
+                hash_hi      INTEGER
             );
             CREATE VIEW IF NOT EXISTS logs_view AS
                 SELECT l.id,
@@ -392,7 +409,9 @@ class DatabaseService:
                        c.name  AS component_name,
                        ll.name AS log_level,
                        l.time_bucket,
-                       l.message
+                       l.message,
+                       l.hash_lo,
+                       l.hash_hi
                 FROM logs l
                 JOIN  files      f  ON f.id  = l.filename_id
                 JOIN  threads    t  ON t.id  = l.thread_id
@@ -405,11 +424,12 @@ class DatabaseService:
             CREATE INDEX IF NOT EXISTS idx_component_id ON logs(component_id);
             CREATE INDEX IF NOT EXISTS idx_log_level_id ON logs(log_level_id);
             CREATE INDEX IF NOT EXISTS idx_time_bucket  ON logs(time_bucket);
+            CREATE INDEX IF NOT EXISTS idx_hash         ON logs(hash_lo, hash_hi);
             CREATE TABLE IF NOT EXISTS schema_meta (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
-            INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('version', '2');
+            INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('version', '3');
         """)
 
     # ------------------------------------------------------------------ #
@@ -466,7 +486,9 @@ class DatabaseService:
                 component_name TEXT,
                 log_level TEXT,
                 time_bucket INTEGER,
-                message TEXT NOT NULL
+                message TEXT NOT NULL,
+                hash_lo INTEGER,
+                hash_hi INTEGER
             )
         """)
 
@@ -474,8 +496,8 @@ class DatabaseService:
         return self.db.prepare("""
             INSERT INTO temp_parsed_logs
                 (filename, timestamp, thread_name, device_id, component_name,
-                 log_level, time_bucket, message)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 log_level, time_bucket, message, hash_lo, hash_hi)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """)
 
     def create_batch_insert_temp(self, insert_stmt):
@@ -484,7 +506,10 @@ class DatabaseService:
                 insert_stmt.run(
                     log['filename'], log['timestamp'], log['threadName'],
                     log.get('deviceId'), log.get('componentName'),
-                    log.get('logLevel'), log.get('timeBucket'), log['message']
+                    log.get('logLevel'), log.get('timeBucket'), log['message'],
+                    *compute_hash_lo_hi(
+                        log.get('deviceId'), log.get('componentName'), log['message']
+                    )
                 )
                 for log in logs
             ]
@@ -504,9 +529,9 @@ class DatabaseService:
             SELECT DISTINCT log_level FROM temp_parsed_logs WHERE log_level IS NOT NULL;
             INSERT INTO logs
                 (filename_id, timestamp, thread_id, device_id, component_id,
-                 log_level_id, time_bucket, message)
+                 log_level_id, time_bucket, message, hash_lo, hash_hi)
             SELECT f.id, tp.timestamp, t.id, d.id, c.id, ll.id,
-                   tp.time_bucket, tp.message
+                   tp.time_bucket, tp.message, tp.hash_lo, tp.hash_hi
             FROM temp_parsed_logs tp
             JOIN  files      f  ON f.filename = tp.filename
             JOIN  threads    t  ON t.name     = tp.thread_name
@@ -555,7 +580,9 @@ class DatabaseService:
                         component_name TEXT,
                         log_level TEXT,
                         time_bucket INTEGER,
-                        message TEXT NOT NULL
+                        message TEXT NOT NULL,
+                        hash_lo INTEGER,
+                        hash_hi INTEGER
                     )
                 """)
 

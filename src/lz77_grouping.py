@@ -18,6 +18,11 @@ group_similar_lines(items, key_fn, on_duplicate, min_match) -> List[Any]
     min_match : int (default 1)
         Minimum block length to trigger on_duplicate.
 
+LZ77GroupingAlgorithm
+    GroupingAlgorithm subclass that wraps group_similar_lines.
+    group() runs deduplication and collects the pattern dictionary in one pass,
+    returning a GroupingResult with both deduplicated items and dictionary.
+
 Internal helpers (exported for testability)
 -------------------------------------------
 _find_longest_match(keys, pos, emitted_starts) -> (start, length) | None
@@ -31,6 +36,8 @@ build_key_dict(window_keys, active_indices) -> Dict[str, List[int]]
 """
 
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+
+from .grouping_interface import DictionaryEntry, GroupingAlgorithm, GroupingResult
 
 _SEP = "\x00"
 
@@ -171,3 +178,84 @@ def group_similar_lines(
                 handled.add(i + offset)
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# LZ77GroupingAlgorithm — GroupingAlgorithm adapter
+# ---------------------------------------------------------------------------
+
+class LZ77GroupingAlgorithm(GroupingAlgorithm):
+    """
+    GroupingAlgorithm implementation backed by the LZ77-inspired engine.
+
+    group() parameters (via **kwargs):
+        on_duplicate : Callable[[Any, int, int, int], Optional[Any]]
+            Called for the first item of each duplicate block.
+            Return None to drop the block; return an item to insert a replacement.
+            Defaults to dropping duplicates (return None).
+        min_match : int (default 1)
+            Minimum block length to trigger on_duplicate.
+    """
+
+    def group(
+        self,
+        items: List[Any],
+        key_fn: Callable[[Any], str],
+        on_duplicate: Optional[Callable[[Any, int, int, int], Optional[Any]]] = None,
+        min_match: int = 1,
+        **kwargs,
+    ) -> GroupingResult:
+        """
+        Deduplicate items and collect the pattern dictionary in a single pass.
+
+        Returns a GroupingResult containing both the deduplicated item list
+        and the pattern dictionary (sorted by repeat_count DESC).
+        """
+        if not items:
+            return GroupingResult(deduplicated=[], dictionary=[])
+
+        keys    = [key_fn(item) for item in items]
+        counts: Dict[Tuple[str, ...], int] = {}
+
+        def _default_on_duplicate(item, dup_pos, match_start, match_len):
+            return None
+
+        effective_on_duplicate = on_duplicate if on_duplicate is not None else _default_on_duplicate
+
+        def _collecting_on_duplicate(item, dup_pos, match_start, match_len):
+            block = tuple(keys[match_start: match_start + match_len])
+            counts[block] = counts.get(block, 0) + 1
+            return effective_on_duplicate(item, dup_pos, match_start, match_len)
+
+        deduplicated = group_similar_lines(
+            items        = items,
+            key_fn       = key_fn,
+            on_duplicate = _collecting_on_duplicate,
+            min_match    = min_match,
+        )
+
+        entries: List[DictionaryEntry] = []
+        seen: Set[Tuple[str, ...]] = set()
+
+        for block, count in counts.items():
+            if block in seen:
+                continue
+            seen.add(block)
+            plen = len(block)
+            # Find all occurrence positions of this block in the original keys.
+            all_occ = tuple(
+                i + 1  # 1-indexed
+                for i in range(len(keys) - plen + 1)
+                if tuple(keys[i: i + plen]) == block
+            )
+            start_line = all_occ[0] if all_occ else 1
+            end_line = start_line + plen - 1
+            entries.append(DictionaryEntry(
+                entry_id     = f"key_{start_line}-{end_line}",
+                key_sequence = block,
+                repeat_count = len(all_occ),
+                occurrences  = all_occ,
+            ))
+
+        entries.sort(key=lambda e: e.repeat_count, reverse=True)
+        return GroupingResult(deduplicated=deduplicated, dictionary=entries)

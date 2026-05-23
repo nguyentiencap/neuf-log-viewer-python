@@ -44,14 +44,16 @@ class FilterLogRequest(BaseModel):
     filters: Optional[Dict[str, Any]] = None
     steps: Optional[List[Dict[str, Any]]] = None
     page: int = 1
-    pageSize: int = 1000
+    pageSize: int = 2000
     raw: bool = False
+    dedup: str = 'annotate'
 
 
 class ExportLogRequest(BaseModel):
     filters: Optional[Dict[str, Any]] = None
     steps: Optional[List[Dict[str, Any]]] = None
     format: str = 'full'
+    dedup: str = 'annotate'
 
 
 class FilterOptionRequest(BaseModel):
@@ -224,8 +226,12 @@ def create_app(folder_path: str, log_service=None) -> FastAPI:
             if body.raw:
                 return JSONResponse(result)
 
+            # Apply per-page dedup before formatting
+            dedup_mode = body.dedup if body.dedup in ('none', 'annotate', 'skip') else 'annotate'
+            logs = log_service.apply_dedup_filter(result.get('logs', []), dedup_mode)
+
             # Format logs (API layer responsibility)
-            formatted_logs = [log_service.format_log_entry(log, 'full') for log in result.get('logs', [])]
+            formatted_logs = [log_service.format_log_entry(log, 'full') for log in logs]
             return JSONResponse({
                 **result,
                 'logs': formatted_logs,
@@ -263,6 +269,8 @@ def create_app(folder_path: str, log_service=None) -> FastAPI:
             if fmt not in ('full', 'compact', 'json', 'csv'):
                 fmt = 'full'
 
+            dedup_mode = body.dedup if body.dedup in ('none', 'annotate', 'skip') else 'annotate'
+
             parsed_filters = parse_filters_from_request(raw_filters, log_service)
             await log_service.apply_preset(folder_path, parsed_filters)
 
@@ -271,24 +279,23 @@ def create_app(folder_path: str, log_service=None) -> FastAPI:
                 folder_path, parsed_filters, {'page': 1, 'pageSize': export_page_size}
             )
 
-            # Collect all pages
-            if fmt in ('json', 'csv'):
-                exported = list(first_result.get('logs', []))
-            else:
-                exported = [log_service.format_log_entry(log, fmt) for log in first_result.get('logs', [])]
-
+            # Collect all pages (raw logs first, dedup applied across full dataset)
+            all_raw_logs = list(first_result.get('logs', []))
             total_pages = first_result.get('totalPages', 1)
             for page in range(2, total_pages + 1):
                 page_result = await log_service.filter_logs(
                     folder_path, parsed_filters, {'page': page, 'pageSize': export_page_size}
                 )
-                if fmt in ('json', 'csv'):
-                    exported.extend(page_result.get('logs', []))
-                else:
-                    exported.extend([
-                        log_service.format_log_entry(log, fmt)
-                        for log in page_result.get('logs', [])
-                    ])
+                all_raw_logs.extend(page_result.get('logs', []))
+
+            # Apply dedup across the full export dataset
+            deduped_logs = log_service.apply_dedup_filter(all_raw_logs, dedup_mode)
+
+            # Format after dedup
+            if fmt in ('json', 'csv'):
+                exported = deduped_logs
+            else:
+                exported = [log_service.format_log_entry(log, fmt) for log in deduped_logs]
 
             ts = _export_timestamp()
 
