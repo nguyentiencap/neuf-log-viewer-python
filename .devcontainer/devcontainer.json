@@ -1,8 +1,8 @@
 {
   "name": "Python NEUF Log Viewer",
-  "image": "mcr.microsoft.com/devcontainers/python:3.11",
-  "features": {
-    "ghcr.io/devcontainers/features/git:1": {}
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "."
   },
   "customizations": {
     "vscode": {
