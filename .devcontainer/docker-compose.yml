@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: neuf-log-viewer-dev
+    volumes:
+      - ../:/workspace:cached
+      - /workspace/.git
+    ports:
+      - "8000:8000"    # FastAPI Server
+      - "3001:3001"    # Frontend Dev Server
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+    command: /bin/bash
+    stdin_open: true
+    tty: true
+
