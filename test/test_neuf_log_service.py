@@ -386,7 +386,7 @@ class TestDedupAndExtractPatterns(unittest.TestCase):
         self.assertEqual(len(result), 3)
         self.assertEqual(result[0]['message'], 'same1')
         self.assertEqual(result[1]['message'], 'same2')
-        self.assertIn('Same as 2026.04.08 10:00:01.000 -> 2026.04.08 10:00:02.000', result[2]['message'])
+        self.assertIn('Same as Pattern #1 - Repeated 2 lines (First seen 2026.04.08 10:00:01.000 -> 2026.04.08 10:00:02.000)', result[2]['message'])
 
     def test_missing_hash_rows_are_not_grouped(self):
         logs = [self._log(1, 'same', None), self._log(2, 'same', None)]

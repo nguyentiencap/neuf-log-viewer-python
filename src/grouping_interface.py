@@ -55,18 +55,22 @@ class DictionaryEntry:
     """
     A single entry in the grouping dictionary.
 
+    rule_id       — internal ID from Re-Pair, guaranteed to be unique per run
     entry_id      — unique identifier: "key_{startLine}-{endLine}" (1-indexed)
     key_sequence  — fully-expanded list of original-key tokens forming the pattern
     repeat_count  — number of times this pattern was found repeated in the input
+
     occurrences   — 1-indexed start positions of every occurrence, sorted ascending
     """
-    entry_id:     str
+    rule_id: int
+    entry_id: str
     key_sequence: Tuple[str, ...]          # immutable; serialised as list
     repeat_count: int
     occurrences:  Tuple[int, ...] = ()     # immutable; serialised as list; default empty for compat
 
     def to_dict(self) -> dict:
         return {
+            "rule_id":      self.rule_id,
             "entry_id":     self.entry_id,
             "key_sequence": list(self.key_sequence),
             "repeat_count": self.repeat_count,

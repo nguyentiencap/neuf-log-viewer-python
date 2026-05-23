@@ -88,7 +88,7 @@ def _run_repair(
     List[Tuple[Any, Any, int]],  # rules
     List[Any],                    # final_seq
     List[int],                    # rule_first_pos  (0-indexed, per rule)
-    List[Tuple[int, int, int]],   # drop_ranges     [(start, end_inclusive, first_orig), ...]
+    List[Tuple[int, int, int, int]],   # drop_ranges     [(start, end_inclusive, sym_id, first_orig), ...]
     List[List[int]],              # rule_all_starts (0-indexed orig_start per occurrence, per rule)
 ]:
     """
@@ -100,7 +100,7 @@ def _run_repair(
     final_seq       : compressed sequence
     rule_first_pos  : for each rule R_k, the 0-indexed original start position
                       of its leftmost (first) occurrence in *keys*
-    drop_ranges     : list of (start, end_inclusive, first_orig) in 0-indexed
+    drop_ranges     : list of (start, end_inclusive, sym_id, first_orig) in 0-indexed
                       original coordinates, one range per non-first occurrence of each rule
     rule_all_starts : for each rule R_k, sorted list of 0-indexed original start
                       positions of ALL occurrences (first + duplicates)
@@ -136,7 +136,7 @@ def _run_repair(
 
     rules:           List[Tuple[Any, Any, int]] = []
     rule_first_pos:  List[int]                  = []
-    drop_ranges:     List[Tuple[int, int, int]]      = []
+    drop_ranges:     List[Tuple[int, int, int, int]] = []
     rule_all_starts: List[List[int]]            = []
 
     def _push(pair: Tuple) -> None:
@@ -184,7 +184,7 @@ def _run_repair(
             if first_orig == -1:
                 first_orig = r_start   # first occurrence → keep
             else:
-                drop_ranges.append((r_start, r_end, first_orig))  # duplicate → drop
+                drop_ranges.append((r_start, r_end, len(rules) - 1, first_orig))  # duplicate → drop
 
             right_nbr = nxt[j]
             left_nbr  = prv[i]
@@ -299,8 +299,8 @@ class RePairGroupingAlgorithm(GroupingAlgorithm):
             deduplicated = list(items)
         else:
             action = [None] * len(keys)
-            for (start, end, first_orig) in drop_ranges:
-                action[start] = (end, first_orig)
+            for (start, end, sym_id, first_orig) in drop_ranges:
+                action[start] = (end, [(sym_id, first_orig, end - start + 1)])
                 for k in range(start + 1, end + 1):
                     action[k] = -1
 
@@ -312,17 +312,22 @@ class RePairGroupingAlgorithm(GroupingAlgorithm):
                     idx += 1
                     continue
                 
-                end, first_orig = act
+                end, chunks1 = act
                 next_idx = end + 1
                 while next_idx < len(items):
                     next_act = action[next_idx]
                     if next_act is None or next_act == -1:
                         break
                     
-                    next_end, next_first_orig = next_act
-                    if next_first_orig == first_orig + (end - idx + 1):
+                    next_end, chunks2 = next_act
+                    
+                    last_sym, last_orig, last_len = chunks1[-1]
+                    first_sym2, first_orig2, first_len2 = chunks2[0]
+                    
+                    if first_orig2 == last_orig + last_len:
                         end = next_end
-                        action[idx] = (end, first_orig)
+                        chunks1.extend(chunks2)
+                        action[idx] = (end, chunks1)
                         action[next_idx] = -1
                         next_idx = end + 1
                     else:
@@ -340,9 +345,9 @@ class RePairGroupingAlgorithm(GroupingAlgorithm):
                 elif act == -1:
                     idx += 1
                 else:
-                    end, first_orig = act
+                    end, chunks = act
                     if on_duplicate:
-                        annotated = on_duplicate(items, idx, first_orig, end - idx + 1)
+                        annotated = on_duplicate(items, idx, chunks, end - idx + 1)
                         if annotated is not None:
                             deduplicated.append(annotated)
                     idx = end + 1
@@ -351,25 +356,41 @@ class RePairGroupingAlgorithm(GroupingAlgorithm):
         if not rules:
             return GroupingResult(deduplicated=deduplicated, dictionary=[])
 
+        true_rule_duplicates = defaultdict(list)
+        if drop_ranges:
+            for idx in range(len(items)):
+                act = action[idx]
+                if act is not None and act != -1:
+                    _, chunks = act
+                    current_idx = idx
+                    for sym_id, orig, length in chunks:
+                        true_rule_duplicates[sym_id].append(current_idx)
+                        current_idx += length
+
         expanded_rules = self._expand_all(rules)
         entries: List[DictionaryEntry] = []
 
         for rule_idx, ((left, right, freq), exp) in enumerate(
             zip(rules, expanded_rules)
         ):
-            actual_count = len(rule_all_starts[rule_idx])
+            duplicates = true_rule_duplicates.get(rule_idx, [])
+            actual_count = 1 + len(duplicates)
+            
             if actual_count < 2:
                 continue
 
             first_0    = rule_first_pos[rule_idx]   # 0-indexed start
             start_line = first_0 + 1                # 1-indexed
             end_line   = first_0 + len(exp)         # 1-indexed inclusive
+            
+            occ_list = [first_0] + duplicates
 
             entries.append(DictionaryEntry(
+                rule_id      = rule_idx,
                 entry_id     = f"key_{start_line}-{end_line}",
                 key_sequence = tuple(exp),
                 repeat_count = actual_count,
-                occurrences  = tuple(s + 1 for s in rule_all_starts[rule_idx]),
+                occurrences  = tuple(s + 1 for s in occ_list),
             ))
 
         entries.sort(key=lambda e: e.repeat_count, reverse=True)

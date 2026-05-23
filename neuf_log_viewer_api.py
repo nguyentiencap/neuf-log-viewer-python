@@ -157,10 +157,11 @@ def _format_patterns_markdown(patterns: list, generated_at: str) -> str:
         out.append('_No repeated patterns detected._')
         return '\n'.join(out)
 
-    for i, p in enumerate(patterns, 1):
+    for p in patterns:
         count = p.get('repeat_count', 0)
         times_label = 'time' if count == 1 else 'times'
-        out.append(f'## Pattern #{i} — Repeated {count} {times_label}')
+        pattern_id = p.get('rule_id', 0) + 1
+        out.append(f'## Pattern #{pattern_id} — Repeated {count} {times_label}')
         out.append('')
 
         component = p.get('component_name') or ''

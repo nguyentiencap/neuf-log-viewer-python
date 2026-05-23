@@ -591,16 +591,13 @@ class NEUFLogService:
         """
         filter_duplicate = (dedup_mode == 'skip')
 
-        def on_duplicate(items, dup_pos, match_start, match_len):
+        def on_duplicate(items, dup_pos, chunks, match_len):
             if filter_duplicate:
                 return None
             modified = dict(items[dup_pos])
-            start_ts = items[match_start].get('timestamp', '')
-            if match_len == 1:
-                modified['message'] = f"Same as {start_ts}"
-            else:
-                end_ts = items[match_start + match_len - 1].get('timestamp', '')
-                modified['message'] = f"Same as {start_ts} -> {end_ts}"
+            modified['_is_annotation'] = True
+            modified['_chunks'] = chunks
+            modified['_match_len'] = match_len
             return modified
 
         return on_duplicate
@@ -642,15 +639,17 @@ class NEUFLogService:
             ]
 
             patterns.append({
+                'rule_id':          entry.rule_id,
                 'pattern_length':   pattern_len,
                 'repeat_count':     entry.repeat_count,
                 'message':          first_row.get('message', ''),
                 'device_id':        first_row.get('device_id'),
                 'component_name':   first_row.get('component_name'),
                 'log_level':        first_row.get('log_level'),
-                'first_occurrence': occurrences_detail[0]['timestamp'],
+                'first_occurrence': occurrences_detail[0]['timestamp'] if occurrences_detail else '',
                 'occurrences':      occurrences_detail,
                 'block_rows':       block_rows,
+                'first_orig':       first_row_idx,
             })
 
         # Sort by total repeated lines = repeat_count × pattern_length (DESC).
@@ -686,6 +685,39 @@ class NEUFLogService:
 
         # For 'none' mode the caller wants the original list back unchanged.
         deduped = logs if dedup_mode == 'none' else result.deduplicated
+
+        if dedup_mode == 'annotate':
+            for item in deduped:
+                if item.get('_is_annotation'):
+                    chunks = item.get('_chunks')
+                    match_len = item.get('_match_len')
+                    
+                    sym_id, first_orig, first_len = chunks[0]
+                    pattern_num = sym_id + 1
+                    lines_str = "1 line" if first_len == 1 else f"{first_len} lines"
+                    base_str = f"Same as Pattern #{pattern_num} - Repeated {lines_str}"
+                    
+                    if len(chunks) > 1:
+                        extra_parts = []
+                        for sym, orig, length in chunks[1:]:
+                            extra_lines = "1 line" if length == 1 else f"{length} lines"
+                            extra_parts.append(f"Pattern #{sym + 1} ({extra_lines})")
+                        base_str += " + " + " + ".join(extra_parts)
+                    
+                    start_orig = chunks[0][1]
+                    end_orig = chunks[-1][1] + chunks[-1][2] - 1
+                    
+                    start_ts = logs[start_orig].get('timestamp', '')
+                    if match_len == 1:
+                        item['message'] = f"{base_str} (First seen {start_ts})"
+                    else:
+                        end_ts = logs[end_orig].get('timestamp', '')
+                        item['message'] = f"{base_str} (First seen {start_ts} -> {end_ts})"
+                    
+                    item.pop('_is_annotation', None)
+                    item.pop('_chunks', None)
+                    item.pop('_match_len', None)
+
         return deduped, patterns
 
 
