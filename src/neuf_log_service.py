@@ -14,6 +14,7 @@ from .log_parser import default_log_parser_service
 from .log_file_scanner import LogFileScannerService
 from .database import DatabaseWrapper, DatabaseService, DB_SCHEMA_VERSION
 from .preset import PresetService
+from .lz77_grouping import LZ77GroupingAlgorithm
 
 
 class NEUFLogService:
@@ -32,6 +33,7 @@ class NEUFLogService:
         self.logger          = logger
         self.sql_logger      = sql_logger
         self.scanner_service = LogFileScannerService(default_log_parser_service, logger)
+        self.grouping_algorithm = LZ77GroupingAlgorithm()
 
     # ------------------------------------------------------------------ #
     #  SQL engine lifecycle (kept for API compatibility)                    #
@@ -418,7 +420,7 @@ class NEUFLogService:
         options = options or {}
         return {
             'page':     options.get('page', 1),
-            'pageSize': options.get('pageSize', 1000),
+            'pageSize': options.get('pageSize', 2000),
         }
 
     def _get_output_table_count(self, database_service, output_table):
@@ -546,6 +548,63 @@ class NEUFLogService:
         count = len(install_presets)
         self.logger(f'💡 Created {count} install presets.')
         return {'success': True, 'count': count}
+
+    # ------------------------------------------------------------------ #
+    #  Duplicate filtering                                                  #
+    # ------------------------------------------------------------------ #
+
+    def apply_dedup_filter(self, logs, dedup_mode):
+        """
+        Apply duplicate filtering to a list of log rows using GroupingAlgorithm.
+
+        The grouping key is reconstructed as (hash_hi << 64 | hash_lo) from the
+        stored hash halves in each row — avoids re-hashing
+        device_id + component_name + message at query time. Rows that lack a
+        hash are always emitted unchanged.
+
+        @param logs:       List of log-row dicts (as returned by filter_logs).
+        @param dedup_mode: 'none'     — return logs unchanged.
+                           'annotate' — replace duplicate message with
+                                        "Giống dòng {first_occurrence_1indexed}".
+                           'skip'     — drop duplicate rows entirely.
+        @returns: Filtered/annotated list of log-row dicts.
+        """
+        if not dedup_mode or dedup_mode == 'none':
+            return logs
+
+        _NO_HASH_PREFIX = '__nohash__'
+        _seen_no_hash = [0]
+        _mask_64 = (1 << 64) - 1
+
+        def key_fn(log):
+            """Use reconstructed MD5 integer key; unique sentinel for null hashes."""
+            h_lo = log.get('hash_lo')
+            h_hi = log.get('hash_hi')
+            if h_lo is None or h_hi is None:
+                # Unique key per object so rows without a hash are never grouped
+                _seen_no_hash[0] += 1
+                return f"{_NO_HASH_PREFIX}{_seen_no_hash[0]}"
+            return ((h_hi & _mask_64) << 64) | (h_lo & _mask_64)
+
+        filter_duplicate = (dedup_mode == 'skip')
+
+        def on_duplicate(item, dup_pos, match_start, match_len):
+            if filter_duplicate:
+                return None
+            modified = dict(item)
+            if match_len == 1:
+                modified['message'] = f"Giống dòng {match_start + 1}"
+            else:
+                modified['message'] = f"Giống dòng {match_start + 1}-{match_start + match_len}"
+            return modified
+
+        result = self.grouping_algorithm.group(
+            logs,
+            key_fn=key_fn,
+            on_duplicate=on_duplicate,
+            min_match=1,
+        )
+        return result.deduplicated
 
     # ------------------------------------------------------------------ #
     #  Output formatting                                                    #

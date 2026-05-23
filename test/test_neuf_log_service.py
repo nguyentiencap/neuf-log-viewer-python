@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.neuf_log_service import NEUFLogService
+from src.database import compute_hash_lo_hi
 
 mock_logger = lambda *_: None
 log_service = NEUFLogService(mock_logger)
@@ -335,6 +336,50 @@ class TestFilterLogsAndGetFilterOptions(unittest.TestCase):
         self.assertIn('Device002', devices)
         self.assertIn('Device003', devices)
         self.assertEqual(len(result['data']['devices']), 3)
+
+
+class TestApplyDedupFilter(unittest.TestCase):
+    def _log(self, idx, message, hash_pair):
+        return {
+            'id': idx,
+            'filename': 'NEUF-test.log',
+            'timestamp': f'2026.04.08 10:00:0{idx}.000',
+            'thread_name': 'Thread-1',
+            'device_id': 'Device001',
+            'component_name': 'com.example',
+            'log_level': 'INFO',
+            'message': message,
+            'hash_lo': hash_pair[0] if hash_pair else None,
+            'hash_hi': hash_pair[1] if hash_pair else None,
+        }
+
+    def test_none_mode_returns_logs_unchanged(self):
+        hash_pair = compute_hash_lo_hi('Device001', 'com.example', 'same')
+        logs = [self._log(1, 'same', hash_pair), self._log(2, 'same', hash_pair)]
+        result = log_service.apply_dedup_filter(logs, 'none')
+        self.assertEqual(result, logs)
+
+    def test_skip_mode_drops_duplicate_rows(self):
+        hash_pair = compute_hash_lo_hi('Device001', 'com.example', 'same')
+        logs = [self._log(1, 'same', hash_pair), self._log(2, 'same', hash_pair)]
+        result = log_service.apply_dedup_filter(logs, 'skip')
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]['id'], 1)
+
+    def test_annotate_mode_marks_duplicate_rows(self):
+        hash_pair = compute_hash_lo_hi('Device001', 'com.example', 'same')
+        logs = [self._log(1, 'same', hash_pair), self._log(2, 'same', hash_pair)]
+        result = log_service.apply_dedup_filter(logs, 'annotate')
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]['message'], 'same')
+        self.assertIn('Giống dòng 1', result[1]['message'])
+
+    def test_missing_hash_rows_are_not_grouped(self):
+        logs = [self._log(1, 'same', None), self._log(2, 'same', None)]
+        result = log_service.apply_dedup_filter(logs, 'skip')
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]['message'], 'same')
+        self.assertEqual(result[1]['message'], 'same')
 
 
 if __name__ == '__main__':
