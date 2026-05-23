@@ -58,7 +58,7 @@ class ExportLogRequest(BaseModel):
     format: str = 'full'
     dedup: str = 'annotate'
     # Supported format values:
-    #   'full', 'compact', 'csv', 'json', 'repeated_patterns'
+    #   'full', 'compact', 'csv', 'json'
 
 
 class FilterOptionRequest(BaseModel):
@@ -137,7 +137,7 @@ def _export_timestamp() -> str:
 
 def _format_patterns_markdown(patterns: list, generated_at: str) -> str:
     """
-    Render a repeated-patterns list (from get_repeated_patterns) as a
+    Render a repeated-patterns list (from dedup_and_extract_patterns) as a
     human-readable Markdown report.
 
     Each pattern dict is expected to have a 'block_lines' key containing
@@ -305,7 +305,7 @@ def create_app(folder_path: str, log_service=None) -> FastAPI:
 
             # Apply per-page dedup before formatting
             dedup_mode = body.dedup if body.dedup in ('none', 'annotate', 'skip') else 'annotate'
-            logs = log_service.apply_dedup_filter(result.get('logs', []), dedup_mode)
+            logs, _ = log_service.dedup_and_extract_patterns(result.get('logs', []), dedup_mode)
 
             # Format logs (API layer responsibility)
             formatted_logs = [log_service.format_log_entry(log, 'full') for log in logs]
@@ -343,7 +343,7 @@ def create_app(folder_path: str, log_service=None) -> FastAPI:
                 raw_filters = (body.steps[0] or {}).get('filters', {})
 
             fmt = body.format
-            if fmt not in ('full', 'compact', 'json', 'csv', 'repeated_patterns'):
+            if fmt not in ('full', 'compact', 'json', 'csv'):
                 fmt = 'full'
 
             dedup_mode = body.dedup if body.dedup in ('none', 'annotate', 'skip') else 'annotate'
@@ -367,27 +367,61 @@ def create_app(folder_path: str, log_service=None) -> FastAPI:
 
             ts = _export_timestamp()
 
-            # -------------------------------------------------------
-            # Special case: repeated_patterns export
-            # Produces a ZIP containing:
-            #   1. neuf-logs-annotated-{ts}.log  — full log with "Same as line N" dedup
-            #   2. neuf-logs-repeated-patterns-{ts}.md  — Markdown pattern report
-            # -------------------------------------------------------
-            if fmt == 'repeated_patterns':
-                # 1. Annotated log file (full format, annotate dedup)
-                annotated_logs = log_service.apply_dedup_filter(all_raw_logs, 'annotate')
-                formatted_entries = [log_service.format_log_entry(lg, 'full') for lg in annotated_logs]
-                log_lines = [
-                    entry.get('formattedLog', '') if isinstance(entry, dict) else str(entry)
-                    for entry in formatted_entries
-                ]
-                log_content = '\n'.join(log_lines)
+            def _build_export_content(logs_list, format_type, ts_str, prefix=""):
+                pfx = f'{prefix}-' if prefix else ''
+                if format_type in ('json', 'csv'):
+                    exported = logs_list
+                else:
+                    exported = [log_service.format_log_entry(lg, format_type) for lg in logs_list]
 
-                # 2. Markdown pattern report
-                patterns = log_service.get_repeated_patterns(all_raw_logs)
+                if format_type == 'json':
+                    filename = f'neuf-logs-export-{pfx}json-{ts_str}.json'
+                    content = json.dumps(exported, indent=2, default=str).encode('utf-8')
+                    return filename, content, 'application/json; charset=utf-8'
 
-                # Format each block's raw rows into display strings (full format)
-                # so the markdown report shows complete, readable log lines.
+                elif format_type == 'csv':
+                    filename = f'neuf-logs-export-{pfx}csv-{ts_str}.csv'
+                    lines = []
+                    if exported:
+                        headers = ['filename', 'timestamp', 'log_level', 'thread', 'device', 'component', 'message']
+                        lines.append(','.join(escape_csv_value(h) for h in headers))
+                        for lg in exported:
+                            row = [
+                                f'({lg.get("filename", "")})',
+                                lg.get('timestamp', ''),
+                                f'[{lg.get("log_level", "")}]',
+                                lg.get('thread_name', ''),
+                                f'<{lg.get("device_id", "")}>',
+                                f'({lg.get("component_name", "")})',
+                                lg.get('message', ''),
+                            ]
+                            lines.append(','.join(escape_csv_value(v) for v in row))
+                    content = '\n'.join(lines).encode('utf-8')
+                    return filename, content, 'text/csv; charset=utf-8'
+
+                else:
+                    # 'full' or 'compact'
+                    format_suffix = 'compact' if format_type == 'compact' else 'full'
+                    filename = f'neuf-logs-export-{pfx}{format_suffix}-{ts_str}.log'
+                    lines = [lg.get('formattedLog', '') if isinstance(lg, dict) else str(lg) for lg in exported]
+                    content = '\n'.join(lines).encode('utf-8')
+                    return filename, content, 'text/plain; charset=utf-8'
+
+            if dedup_mode == 'none':
+                filename, content, media_type = _build_export_content(all_raw_logs, fmt, ts)
+                return Response(
+                    content=content,
+                    media_type=media_type,
+                    headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+                )
+            else:
+                # 1. Original format without deduplication
+                orig_filename, orig_content, _ = _build_export_content(all_raw_logs, fmt, ts, prefix='original')
+
+                # 2. Deduped format & 3. Markdown pattern report (processed together)
+                deduped_logs, patterns = log_service.dedup_and_extract_patterns(all_raw_logs, dedup_mode)
+                dedup_filename, dedup_content, _ = _build_export_content(deduped_logs, fmt, ts, prefix='dedup')
+
                 for p in patterns:
                     raw_block = p.pop('block_rows', [])
                     block_formatted = [log_service.format_log_entry(row, 'full') for row in raw_block]
@@ -395,82 +429,23 @@ def create_app(folder_path: str, log_service=None) -> FastAPI:
                         f.get('formattedLog', '') if isinstance(f, dict) else str(f)
                         for f in block_formatted
                     ]
-
                 generated_at = datetime.now().strftime('%Y.%m.%d %H:%M:%S')
-                md_content = _format_patterns_markdown(patterns, generated_at)
+                md_content = _format_patterns_markdown(patterns, generated_at).encode('utf-8')
+                md_filename = f'neuf-logs-repeated-patterns-{ts}.md'
 
-                # 3. Pack both into a ZIP (in-memory)
+                # Pack into a ZIP
                 zip_buffer = io.BytesIO()
                 with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
-                    zf.writestr(
-                        f'neuf-logs-annotated-{ts}.log',
-                        log_content.encode('utf-8'),
-                    )
-                    zf.writestr(
-                        f'neuf-logs-repeated-patterns-{ts}.md',
-                        md_content.encode('utf-8'),
-                    )
+                    zf.writestr(orig_filename, orig_content)
+                    zf.writestr(dedup_filename, dedup_content)
+                    zf.writestr(md_filename, md_content)
                 zip_buffer.seek(0)
 
-                zip_filename = f'neuf-logs-repeated-{ts}.zip'
+                zip_filename = f'neuf-logs-export-{ts}.zip'
                 return Response(
                     content=zip_buffer.read(),
                     media_type='application/zip',
                     headers={'Content-Disposition': f'attachment; filename="{zip_filename}"'},
-                )
-
-            # Apply dedup across the full export dataset
-            deduped_logs = log_service.apply_dedup_filter(all_raw_logs, dedup_mode)
-
-            # Format after dedup
-            if fmt in ('json', 'csv'):
-                exported = deduped_logs
-            else:
-                exported = [log_service.format_log_entry(log, fmt) for log in deduped_logs]
-
-            if fmt == 'json':
-                filename = f'neuf-logs-export-{ts}-json.json'
-                content = json.dumps(exported, indent=2, default=str)
-                return Response(
-                    content=content.encode('utf-8'),
-                    media_type='application/json; charset=utf-8',
-                    headers={'Content-Disposition': f'attachment; filename="{filename}"'},
-                )
-
-            elif fmt == 'csv':
-                filename = f'neuf-logs-export-{ts}-csv.csv'
-                lines = []
-                if exported:
-                    headers = ['filename', 'timestamp', 'log_level', 'thread', 'device', 'component', 'message']
-                    lines.append(','.join(escape_csv_value(h) for h in headers))
-                    for log in exported:
-                        row = [
-                            f'({log.get("filename", "")})',
-                            log.get('timestamp', ''),
-                            f'[{log.get("log_level", "")}]',
-                            log.get('thread_name', ''),
-                            f'<{log.get("device_id", "")}>',
-                            f'({log.get("component_name", "")})',
-                            log.get('message', ''),
-                        ]
-                        lines.append(','.join(escape_csv_value(v) for v in row))
-                csv_content = '\n'.join(lines)
-                return Response(
-                    content=csv_content.encode('utf-8'),
-                    media_type='text/csv; charset=utf-8',
-                    headers={'Content-Disposition': f'attachment; filename="{filename}"'},
-                )
-
-            else:
-                # 'full' or 'compact' — exported is a list of formatted log objects
-                format_suffix = 'compact' if fmt == 'compact' else 'full'
-                filename = f'neuf-logs-export-{ts}-{format_suffix}.log'
-                lines = [log.get('formattedLog', '') if isinstance(log, dict) else str(log) for log in exported]
-                text_content = '\n'.join(lines)
-                return Response(
-                    content=text_content.encode('utf-8'),
-                    media_type='text/plain; charset=utf-8',
-                    headers={'Content-Disposition': f'attachment; filename="{filename}"'},
                 )
 
         except Exception:

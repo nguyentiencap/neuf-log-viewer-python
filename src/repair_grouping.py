@@ -88,7 +88,7 @@ def _run_repair(
     List[Tuple[Any, Any, int]],  # rules
     List[Any],                    # final_seq
     List[int],                    # rule_first_pos  (0-indexed, per rule)
-    List[Tuple[int, int]],        # drop_ranges     [(start, end_inclusive), ...]
+    List[Tuple[int, int, int]],   # drop_ranges     [(start, end_inclusive, first_orig), ...]
     List[List[int]],              # rule_all_starts (0-indexed orig_start per occurrence, per rule)
 ]:
     """
@@ -100,8 +100,8 @@ def _run_repair(
     final_seq       : compressed sequence
     rule_first_pos  : for each rule R_k, the 0-indexed original start position
                       of its leftmost (first) occurrence in *keys*
-    drop_ranges     : list of (start, end_inclusive) in 0-indexed original
-                      coordinates, one range per non-first occurrence of each rule
+    drop_ranges     : list of (start, end_inclusive, first_orig) in 0-indexed
+                      original coordinates, one range per non-first occurrence of each rule
     rule_all_starts : for each rule R_k, sorted list of 0-indexed original start
                       positions of ALL occurrences (first + duplicates)
     """
@@ -136,7 +136,7 @@ def _run_repair(
 
     rules:           List[Tuple[Any, Any, int]] = []
     rule_first_pos:  List[int]                  = []
-    drop_ranges:     List[Tuple[int, int]]      = []
+    drop_ranges:     List[Tuple[int, int, int]]      = []
     rule_all_starts: List[List[int]]            = []
 
     def _push(pair: Tuple) -> None:
@@ -184,7 +184,7 @@ def _run_repair(
             if first_orig == -1:
                 first_orig = r_start   # first occurrence → keep
             else:
-                drop_ranges.append((r_start, r_end))  # duplicate → drop
+                drop_ranges.append((r_start, r_end, first_orig))  # duplicate → drop
 
             right_nbr = nxt[j]
             left_nbr  = prv[i]
@@ -292,14 +292,60 @@ class RePairGroupingAlgorithm(GroupingAlgorithm):
         keys  = [key_fn(item) for item in items]
         rules, _final, rule_first_pos, drop_ranges, rule_all_starts = _run_repair(keys)
 
+        on_duplicate = kwargs.get('on_duplicate')
+
         # --- deduplicated list ---
         if not drop_ranges:
             deduplicated = list(items)
         else:
-            keep = bytearray(b'\x01' * len(keys))
-            for (start, end) in drop_ranges:
-                keep[start: end + 1] = b'\x00' * (end - start + 1)
-            deduplicated = [item for idx, item in enumerate(items) if keep[idx]]
+            action = [None] * len(keys)
+            for (start, end, first_orig) in drop_ranges:
+                action[start] = (end, first_orig)
+                for k in range(start + 1, end + 1):
+                    action[k] = -1
+
+            # --- MERGE ADJACENT CONTIGUOUS BLOCKS ---
+            idx = 0
+            while idx < len(items):
+                act = action[idx]
+                if act is None or act == -1:
+                    idx += 1
+                    continue
+                
+                end, first_orig = act
+                next_idx = end + 1
+                while next_idx < len(items):
+                    next_act = action[next_idx]
+                    if next_act is None or next_act == -1:
+                        break
+                    
+                    next_end, next_first_orig = next_act
+                    if next_first_orig == first_orig + (end - idx + 1):
+                        end = next_end
+                        action[idx] = (end, first_orig)
+                        action[next_idx] = -1
+                        next_idx = end + 1
+                    else:
+                        break
+                idx = end + 1
+            # ----------------------------------------
+
+            deduplicated = []
+            idx = 0
+            while idx < len(items):
+                act = action[idx]
+                if act is None:
+                    deduplicated.append(items[idx])
+                    idx += 1
+                elif act == -1:
+                    idx += 1
+                else:
+                    end, first_orig = act
+                    if on_duplicate:
+                        annotated = on_duplicate(items, idx, first_orig, end - idx + 1)
+                        if annotated is not None:
+                            deduplicated.append(annotated)
+                    idx = end + 1
 
         # --- dictionary ---
         if not rules:

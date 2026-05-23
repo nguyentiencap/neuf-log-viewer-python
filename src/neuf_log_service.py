@@ -587,18 +587,20 @@ class NEUFLogService:
         Return the on_duplicate callback for a given dedup mode.
 
         'skip'     → return None  (drop duplicate block entirely)
-        'annotate' → return modified copy with "Giống dòng N" message
+        'annotate' → return modified copy with "Same as lines N" message
         """
         filter_duplicate = (dedup_mode == 'skip')
 
-        def on_duplicate(item, dup_pos, match_start, match_len):
+        def on_duplicate(items, dup_pos, match_start, match_len):
             if filter_duplicate:
                 return None
-            modified = dict(item)
+            modified = dict(items[dup_pos])
+            start_ts = items[match_start].get('timestamp', '')
             if match_len == 1:
-                modified['message'] = f"Giống dòng {match_start + 1}"
+                modified['message'] = f"Same as {start_ts}"
             else:
-                modified['message'] = f"Giống dòng {match_start + 1}-{match_start + match_len}"
+                end_ts = items[match_start + match_len - 1].get('timestamp', '')
+                modified['message'] = f"Same as {start_ts} -> {end_ts}"
             return modified
 
         return on_duplicate
@@ -661,8 +663,6 @@ class NEUFLogService:
         list AND the repeated-patterns list.
 
         This is the single source of truth for all dedup + pattern work.
-        Callers that only need one output should use the convenience wrappers
-        apply_dedup_filter() or get_repeated_patterns().
 
         @param logs:       List of raw log-row dicts.
         @param dedup_mode: 'none' | 'annotate' | 'skip'
@@ -688,42 +688,7 @@ class NEUFLogService:
         deduped = logs if dedup_mode == 'none' else result.deduplicated
         return deduped, patterns
 
-    # ------------------------------------------------------------------ #
-    #  Duplicate filtering (convenience wrapper)                           #
-    # ------------------------------------------------------------------ #
 
-    def apply_dedup_filter(self, logs, dedup_mode):
-        """
-        Apply duplicate filtering to a list of log rows.
-
-        Delegates to dedup_and_extract_patterns(); discards the pattern dict.
-        Fast-path for 'none' mode skips the grouping engine entirely.
-
-        @param logs:       List of log-row dicts (as returned by filter_logs).
-        @param dedup_mode: 'none' | 'annotate' | 'skip'
-        @returns: Filtered/annotated list of log-row dicts.
-        """
-        if not dedup_mode or dedup_mode == 'none':
-            return logs
-        deduped, _ = self.dedup_and_extract_patterns(logs, dedup_mode)
-        return deduped
-
-    # ------------------------------------------------------------------ #
-    #  Repeated pattern analysis (convenience wrapper)                     #
-    # ------------------------------------------------------------------ #
-
-    def get_repeated_patterns(self, logs):
-        """
-        Analyse a list of log rows and return the repeated-patterns list.
-
-        Delegates to dedup_and_extract_patterns(); discards the dedup result.
-        Patterns are sorted by (repeat_count × pattern_length) DESC.
-
-        @param logs: List of log-row dicts (raw, without prior dedup).
-        @returns: List of pattern dicts (see _build_patterns_from_result).
-        """
-        _, patterns = self.dedup_and_extract_patterns(logs, 'annotate')
-        return patterns
 
     # ------------------------------------------------------------------ #
     #  Output formatting                                                    #

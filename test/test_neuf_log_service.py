@@ -338,7 +338,7 @@ class TestFilterLogsAndGetFilterOptions(unittest.TestCase):
         self.assertEqual(len(result['data']['devices']), 3)
 
 
-class TestApplyDedupFilter(unittest.TestCase):
+class TestDedupAndExtractPatterns(unittest.TestCase):
     def _log(self, idx, message, hash_pair):
         return {
             'id': idx,
@@ -354,29 +354,43 @@ class TestApplyDedupFilter(unittest.TestCase):
         }
 
     def test_none_mode_returns_logs_unchanged(self):
-        hash_pair = compute_hash_lo_hi('Device001', 'com.example', 'same')
-        logs = [self._log(1, 'same', hash_pair), self._log(2, 'same', hash_pair)]
-        result = log_service.apply_dedup_filter(logs, 'none')
+        hash_1 = compute_hash_lo_hi('Device001', 'com.example', 'same1')
+        hash_2 = compute_hash_lo_hi('Device001', 'com.example', 'same2')
+        logs = [
+            self._log(1, 'same1', hash_1), self._log(2, 'same2', hash_2),
+            self._log(3, 'same1', hash_1), self._log(4, 'same2', hash_2)
+        ]
+        result, _ = log_service.dedup_and_extract_patterns(logs, 'none')
         self.assertEqual(result, logs)
 
     def test_skip_mode_drops_duplicate_rows(self):
-        hash_pair = compute_hash_lo_hi('Device001', 'com.example', 'same')
-        logs = [self._log(1, 'same', hash_pair), self._log(2, 'same', hash_pair)]
-        result = log_service.apply_dedup_filter(logs, 'skip')
-        self.assertEqual(len(result), 1)
+        hash_1 = compute_hash_lo_hi('Device001', 'com.example', 'same1')
+        hash_2 = compute_hash_lo_hi('Device001', 'com.example', 'same2')
+        logs = [
+            self._log(1, 'same1', hash_1), self._log(2, 'same2', hash_2),
+            self._log(3, 'same1', hash_1), self._log(4, 'same2', hash_2)
+        ]
+        result, _ = log_service.dedup_and_extract_patterns(logs, 'skip')
+        self.assertEqual(len(result), 2)
         self.assertEqual(result[0]['id'], 1)
+        self.assertEqual(result[1]['id'], 2)
 
     def test_annotate_mode_marks_duplicate_rows(self):
-        hash_pair = compute_hash_lo_hi('Device001', 'com.example', 'same')
-        logs = [self._log(1, 'same', hash_pair), self._log(2, 'same', hash_pair)]
-        result = log_service.apply_dedup_filter(logs, 'annotate')
-        self.assertEqual(len(result), 2)
-        self.assertEqual(result[0]['message'], 'same')
-        self.assertIn('Same as line 1', result[1]['message'])
+        hash_1 = compute_hash_lo_hi('Device001', 'com.example', 'same1')
+        hash_2 = compute_hash_lo_hi('Device001', 'com.example', 'same2')
+        logs = [
+            self._log(1, 'same1', hash_1), self._log(2, 'same2', hash_2),
+            self._log(3, 'same1', hash_1), self._log(4, 'same2', hash_2)
+        ]
+        result, _ = log_service.dedup_and_extract_patterns(logs, 'annotate')
+        self.assertEqual(len(result), 3)
+        self.assertEqual(result[0]['message'], 'same1')
+        self.assertEqual(result[1]['message'], 'same2')
+        self.assertIn('Same as 2026.04.08 10:00:01.000 -> 2026.04.08 10:00:02.000', result[2]['message'])
 
     def test_missing_hash_rows_are_not_grouped(self):
         logs = [self._log(1, 'same', None), self._log(2, 'same', None)]
-        result = log_service.apply_dedup_filter(logs, 'skip')
+        result, _ = log_service.dedup_and_extract_patterns(logs, 'skip')
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0]['message'], 'same')
         self.assertEqual(result[1]['message'], 'same')

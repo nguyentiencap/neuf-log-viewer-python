@@ -104,7 +104,7 @@ def _make_service(
     svc.get_filter_options = AsyncMock(return_value=filter_options)
     svc.get_preset_suggestions = AsyncMock(return_value=preset_suggestions)
     svc.format_log_entry = MagicMock(side_effect=lambda log, fmt: {**log, 'formattedLog': f'{log["timestamp"]} [{log["log_level"]}] {log["message"]}'})
-    svc.apply_dedup_filter = MagicMock(side_effect=lambda logs, mode: logs)
+    svc.dedup_and_extract_patterns = MagicMock(side_effect=lambda logs, mode: (logs, []))
     return svc
 
 
