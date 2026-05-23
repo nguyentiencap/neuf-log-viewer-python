@@ -140,14 +140,14 @@ class TestGroupNeufLogsFilterFalse(unittest.TestCase):
         lines = [make_line(message="A"), make_line(message="A")]
         result = group_neuf_logs(lines, filter_duplicate=False)
         self.assertEqual(result[0]["message"], "A")
-        self.assertIn("Giống dòng", result[1]["message"])
+        self.assertIn("Same as line", result[1]["message"])
         self.assertIn("1", result[1]["message"])
 
     def test_two_line_block_annotation_contains_range(self):
         lines  = [make_line(message=m) for m in ["A", "B", "C", "A", "B", "D"]]
         result = group_neuf_logs(lines, filter_duplicate=False)
         msg    = result[3]["message"]
-        self.assertIn("Giống dòng", msg)
+        self.assertIn("Same as line", msg)
         self.assertIn("1", msg)
         self.assertIn("2", msg)
 
@@ -166,11 +166,11 @@ class TestGroupNeufLogsFilterFalse(unittest.TestCase):
         self.assertEqual(result[1]["message"], "B")
         self.assertEqual(result[2]["message"], "C")
         msg3 = result[3]["message"]
-        self.assertIn("Giống dòng", msg3)
+        self.assertIn("Same as line", msg3)
         self.assertIn("1", msg3)
         self.assertIn("3", msg3)
         msg4 = result[4]["message"]
-        self.assertIn("Giống dòng", msg4)
+        self.assertIn("Same as line", msg4)
         self.assertIn("1", msg4)
         self.assertIn("2", msg4)
 
@@ -184,7 +184,7 @@ class TestGroupNeufLogsFilterFalse(unittest.TestCase):
         ann = result[1]
         self.assertEqual(ann["filename"],  "NEUF-a.log")
         self.assertEqual(ann["timestamp"], "10:01")
-        self.assertIn("Giống dòng", ann["message"])
+        self.assertIn("Same as line", ann["message"])
 
     def test_first_occurrence_message_unchanged(self):
         lines = [make_line(message="X"), make_line(message="X")]
@@ -196,8 +196,8 @@ class TestGroupNeufLogsFilterFalse(unittest.TestCase):
         result = group_neuf_logs(lines, filter_duplicate=False)
         self.assertEqual(len(result), 3)
         self.assertEqual(result[0]["message"], "X")
-        self.assertIn("Giống dòng", result[1]["message"])
-        self.assertIn("Giống dòng", result[2]["message"])
+        self.assertIn("Same as line", result[1]["message"])
+        self.assertIn("Same as line", result[2]["message"])
 
 
 # ---------------------------------------------------------------------------

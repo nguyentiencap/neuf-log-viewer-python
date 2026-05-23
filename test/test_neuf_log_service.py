@@ -372,7 +372,7 @@ class TestApplyDedupFilter(unittest.TestCase):
         result = log_service.apply_dedup_filter(logs, 'annotate')
         self.assertEqual(len(result), 2)
         self.assertEqual(result[0]['message'], 'same')
-        self.assertIn('Giống dòng 1', result[1]['message'])
+        self.assertIn('Same as line 1', result[1]['message'])
 
     def test_missing_hash_rows_are_not_grouped(self):
         logs = [self._log(1, 'same', None), self._log(2, 'same', None)]

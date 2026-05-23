@@ -13,9 +13,12 @@ Provides REST API endpoints for log analysis:
   GET  /health              - Health check
 """
 
+import io
+import json
 import os
 import sys
 import traceback
+import zipfile
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -54,6 +57,8 @@ class ExportLogRequest(BaseModel):
     steps: Optional[List[Dict[str, Any]]] = None
     format: str = 'full'
     dedup: str = 'annotate'
+    # Supported format values:
+    #   'full', 'compact', 'csv', 'json', 'repeated_patterns'
 
 
 class FilterOptionRequest(BaseModel):
@@ -128,6 +133,78 @@ def _export_timestamp() -> str:
     """Generate a YYYY.MM.DD_HH-mm-ss timestamp string for file names."""
     now = datetime.now()
     return now.strftime('%Y.%m.%d_%H-%M-%S')
+
+
+def _format_patterns_markdown(patterns: list, generated_at: str) -> str:
+    """
+    Render a repeated-patterns list (from get_repeated_patterns) as a
+    human-readable Markdown report.
+
+    Each pattern dict is expected to have a 'block_lines' key containing
+    the already-formatted log lines (full or compact) for the first occurrence
+    of the block.  Falls back to 'message' if block_lines is absent.
+    """
+    out = []
+    out.append('# NEUF Log — Repeated Patterns Report')
+    out.append('')
+    out.append(f'**Generated:** {generated_at}')
+    out.append(f'**Total patterns found:** {len(patterns)}')
+    out.append('')
+    out.append('---')
+    out.append('')
+
+    if not patterns:
+        out.append('_No repeated patterns detected._')
+        return '\n'.join(out)
+
+    for i, p in enumerate(patterns, 1):
+        count = p.get('repeat_count', 0)
+        times_label = 'time' if count == 1 else 'times'
+        out.append(f'## Pattern #{i} — Repeated {count} {times_label}')
+        out.append('')
+
+        component = p.get('component_name') or ''
+        device    = p.get('device_id')     or ''
+        level     = p.get('log_level')     or ''
+        plen      = p.get('pattern_length', 1)
+
+        if component:
+            out.append(f'**Component:** `{component}`  ')
+        if device:
+            out.append(f'**Device:** `{device}`  ')
+        if level:
+            out.append(f'**Level:** `{level}`  ')
+        out.append(f'**Block length:** {plen} consecutive line{"s" if plen != 1 else ""}  ')
+        out.append(f'**First seen:** {p.get("first_occurrence", "")}  ')
+        out.append('')
+
+        # block_lines: formatted log lines for the first occurrence of this block.
+        # Falls back to the raw message field when not available.
+        block_lines = p.get('block_lines')
+        if block_lines:
+            label = 'Message' if len(block_lines) == 1 else f'Block ({len(block_lines)} lines)'
+        else:
+            block_lines = [p.get('message', '')]
+            label = 'Message'
+        out.append(f'**{label}:**')
+        out.append('```')
+        for line in block_lines:
+            out.append(line)
+        out.append('```')
+        out.append('')
+
+        occurrences = p.get('occurrences', [])
+        out.append(f'**All occurrences ({len(occurrences)}):**')
+        out.append('')
+        out.append('| # | Line | Timestamp |')
+        out.append('|---|------|-----------|')
+        for j, occ in enumerate(occurrences, 1):
+            out.append(f'| {j} | {occ.get("line", "")} | {occ.get("timestamp", "")} |')
+        out.append('')
+        out.append('---')
+        out.append('')
+
+    return '\n'.join(out)
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +343,7 @@ def create_app(folder_path: str, log_service=None) -> FastAPI:
                 raw_filters = (body.steps[0] or {}).get('filters', {})
 
             fmt = body.format
-            if fmt not in ('full', 'compact', 'json', 'csv'):
+            if fmt not in ('full', 'compact', 'json', 'csv', 'repeated_patterns'):
                 fmt = 'full'
 
             dedup_mode = body.dedup if body.dedup in ('none', 'annotate', 'skip') else 'annotate'
@@ -288,6 +365,60 @@ def create_app(folder_path: str, log_service=None) -> FastAPI:
                 )
                 all_raw_logs.extend(page_result.get('logs', []))
 
+            ts = _export_timestamp()
+
+            # -------------------------------------------------------
+            # Special case: repeated_patterns export
+            # Produces a ZIP containing:
+            #   1. neuf-logs-annotated-{ts}.log  — full log with "Same as line N" dedup
+            #   2. neuf-logs-repeated-patterns-{ts}.md  — Markdown pattern report
+            # -------------------------------------------------------
+            if fmt == 'repeated_patterns':
+                # 1. Annotated log file (full format, annotate dedup)
+                annotated_logs = log_service.apply_dedup_filter(all_raw_logs, 'annotate')
+                formatted_entries = [log_service.format_log_entry(lg, 'full') for lg in annotated_logs]
+                log_lines = [
+                    entry.get('formattedLog', '') if isinstance(entry, dict) else str(entry)
+                    for entry in formatted_entries
+                ]
+                log_content = '\n'.join(log_lines)
+
+                # 2. Markdown pattern report
+                patterns = log_service.get_repeated_patterns(all_raw_logs)
+
+                # Format each block's raw rows into display strings (full format)
+                # so the markdown report shows complete, readable log lines.
+                for p in patterns:
+                    raw_block = p.pop('block_rows', [])
+                    block_formatted = [log_service.format_log_entry(row, 'full') for row in raw_block]
+                    p['block_lines'] = [
+                        f.get('formattedLog', '') if isinstance(f, dict) else str(f)
+                        for f in block_formatted
+                    ]
+
+                generated_at = datetime.now().strftime('%Y.%m.%d %H:%M:%S')
+                md_content = _format_patterns_markdown(patterns, generated_at)
+
+                # 3. Pack both into a ZIP (in-memory)
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+                    zf.writestr(
+                        f'neuf-logs-annotated-{ts}.log',
+                        log_content.encode('utf-8'),
+                    )
+                    zf.writestr(
+                        f'neuf-logs-repeated-patterns-{ts}.md',
+                        md_content.encode('utf-8'),
+                    )
+                zip_buffer.seek(0)
+
+                zip_filename = f'neuf-logs-repeated-{ts}.zip'
+                return Response(
+                    content=zip_buffer.read(),
+                    media_type='application/zip',
+                    headers={'Content-Disposition': f'attachment; filename="{zip_filename}"'},
+                )
+
             # Apply dedup across the full export dataset
             deduped_logs = log_service.apply_dedup_filter(all_raw_logs, dedup_mode)
 
@@ -297,12 +428,9 @@ def create_app(folder_path: str, log_service=None) -> FastAPI:
             else:
                 exported = [log_service.format_log_entry(log, fmt) for log in deduped_logs]
 
-            ts = _export_timestamp()
-
             if fmt == 'json':
                 filename = f'neuf-logs-export-{ts}-json.json'
-                import json as _json
-                content = _json.dumps(exported, indent=2, default=str)
+                content = json.dumps(exported, indent=2, default=str)
                 return Response(
                     content=content.encode('utf-8'),
                     media_type='application/json; charset=utf-8',

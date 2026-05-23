@@ -11,8 +11,8 @@ Public API
 group_neuf_logs(lines, filter_duplicate, min_match) -> List[dict]
     filter_duplicate=True  : duplicate blocks removed entirely.
     filter_duplicate=False : each duplicate block collapsed to 1 annotation line.
-                             "Giống dòng {j+1}"          (block length = 1)
-                             "Giống dòng {j+1}-{j+L}"    (block length > 1)
+                             "Same as line {j+1}"          (block length = 1)
+                             "Same as line {j+1}-{j+L}"    (block length > 1)
 """
 
 from typing import List, Optional
@@ -51,9 +51,9 @@ def _make_neuf_on_duplicate(filter_duplicate: bool):
             return None
         modified = dict(item)
         if match_len == 1:
-            modified["message"] = f"Giống dòng {match_start + 1}"
+            modified["message"] = f"Same as line {match_start + 1}"
         else:
-            modified["message"] = f"Giống dòng {match_start + 1}-{match_start + match_len}"
+            modified["message"] = f"Same as line {match_start + 1}-{match_start + match_len}"
         return modified
 
     return on_duplicate

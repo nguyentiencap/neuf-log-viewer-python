@@ -14,7 +14,7 @@ from .log_parser import default_log_parser_service
 from .log_file_scanner import LogFileScannerService
 from .database import DatabaseWrapper, DatabaseService, DB_SCHEMA_VERSION
 from .preset import PresetService
-from .lz77_grouping import LZ77GroupingAlgorithm
+from .repair_grouping import RePairGroupingAlgorithm
 
 
 class NEUFLogService:
@@ -33,7 +33,7 @@ class NEUFLogService:
         self.logger          = logger
         self.sql_logger      = sql_logger
         self.scanner_service = LogFileScannerService(default_log_parser_service, logger)
-        self.grouping_algorithm = LZ77GroupingAlgorithm()
+        self.grouping_algorithm = RePairGroupingAlgorithm()
 
     # ------------------------------------------------------------------ #
     #  SQL engine lifecycle (kept for API compatibility)                    #
@@ -550,42 +550,45 @@ class NEUFLogService:
         return {'success': True, 'count': count}
 
     # ------------------------------------------------------------------ #
-    #  Duplicate filtering                                                  #
+    #  Dedup + pattern extraction (shared engine)                          #
     # ------------------------------------------------------------------ #
 
-    def apply_dedup_filter(self, logs, dedup_mode):
+    @staticmethod
+    def _make_log_key_fn():
         """
-        Apply duplicate filtering to a list of log rows using GroupingAlgorithm.
+        Return a key_fn closure that fingerprints each log row from its stored
+        MD5 hash halves (hash_hi, hash_lo).  Rows without a hash get a unique
+        sentinel so they are never grouped together.
 
-        The grouping key is reconstructed as (hash_hi << 64 | hash_lo) from the
-        stored hash halves in each row — avoids re-hashing
-        device_id + component_name + message at query time. Rows that lack a
-        hash are always emitted unchanged.
-
-        @param logs:       List of log-row dicts (as returned by filter_logs).
-        @param dedup_mode: 'none'     — return logs unchanged.
-                           'annotate' — replace duplicate message with
-                                        "Giống dòng {first_occurrence_1indexed}".
-                           'skip'     — drop duplicate rows entirely.
-        @returns: Filtered/annotated list of log-row dicts.
+        Keys are always returned as str so that grouping algorithms that use
+        isinstance(sym, str) to distinguish terminals from rule symbols (e.g.
+        RE-PAIR) work correctly.
         """
-        if not dedup_mode or dedup_mode == 'none':
-            return logs
-
         _NO_HASH_PREFIX = '__nohash__'
-        _seen_no_hash = [0]
-        _mask_64 = (1 << 64) - 1
+        _seen = [0]
+        _mask = (1 << 64) - 1
 
         def key_fn(log):
-            """Use reconstructed MD5 integer key; unique sentinel for null hashes."""
             h_lo = log.get('hash_lo')
             h_hi = log.get('hash_hi')
             if h_lo is None or h_hi is None:
-                # Unique key per object so rows without a hash are never grouped
-                _seen_no_hash[0] += 1
-                return f"{_NO_HASH_PREFIX}{_seen_no_hash[0]}"
-            return ((h_hi & _mask_64) << 64) | (h_lo & _mask_64)
+                _seen[0] += 1
+                return f'{_NO_HASH_PREFIX}{_seen[0]}'
+            # Cast to str — RE-PAIR uses isinstance(sym, str) to tell terminals
+            # apart from integer rule IDs; returning a raw int would cause it to
+            # try rules[hash_value] and raise IndexError.
+            return str(((h_hi & _mask) << 64) | (h_lo & _mask))
 
+        return key_fn
+
+    @staticmethod
+    def _make_dedup_on_duplicate(dedup_mode):
+        """
+        Return the on_duplicate callback for a given dedup mode.
+
+        'skip'     → return None  (drop duplicate block entirely)
+        'annotate' → return modified copy with "Giống dòng N" message
+        """
         filter_duplicate = (dedup_mode == 'skip')
 
         def on_duplicate(item, dup_pos, match_start, match_len):
@@ -598,13 +601,129 @@ class NEUFLogService:
                 modified['message'] = f"Giống dòng {match_start + 1}-{match_start + match_len}"
             return modified
 
+        return on_duplicate
+
+    @staticmethod
+    def _build_patterns_from_result(grouping_result, logs):
+        """
+        Convert a GroupingResult.dictionary into the structured patterns list
+        used by the export layer.
+
+        Each entry has: pattern_length, repeat_count, message, device_id,
+        component_name, log_level, first_occurrence, occurrences, block_rows.
+        Sorted by (repeat_count × pattern_length) DESC.
+        """
+        patterns = []
+        for entry in grouping_result.dictionary:
+            pattern_len = len(entry.key_sequence)
+            occurrences_detail = []
+            for occ_1idx in entry.occurrences:
+                row_idx = occ_1idx - 1
+                if 0 <= row_idx < len(logs):
+                    row = logs[row_idx]
+                    occurrences_detail.append({
+                        'line':      occ_1idx,
+                        'timestamp': row.get('timestamp', ''),
+                    })
+
+            if not occurrences_detail:
+                continue
+
+            first_row_idx = entry.occurrences[0] - 1
+            first_row = logs[first_row_idx] if 0 <= first_row_idx < len(logs) else {}
+
+            # Raw rows for the first occurrence — caller formats them as needed.
+            block_rows = [
+                logs[first_row_idx + k]
+                for k in range(pattern_len)
+                if 0 <= first_row_idx + k < len(logs)
+            ]
+
+            patterns.append({
+                'pattern_length':   pattern_len,
+                'repeat_count':     entry.repeat_count,
+                'message':          first_row.get('message', ''),
+                'device_id':        first_row.get('device_id'),
+                'component_name':   first_row.get('component_name'),
+                'log_level':        first_row.get('log_level'),
+                'first_occurrence': occurrences_detail[0]['timestamp'],
+                'occurrences':      occurrences_detail,
+                'block_rows':       block_rows,
+            })
+
+        # Sort by total repeated lines = repeat_count × pattern_length (DESC).
+        patterns.sort(key=lambda p: p['repeat_count'] * p['pattern_length'], reverse=True)
+        return patterns
+
+    def dedup_and_extract_patterns(self, logs, dedup_mode):
+        """
+        Run LZ77 grouping ONCE, returning both the deduplicated/annotated log
+        list AND the repeated-patterns list.
+
+        This is the single source of truth for all dedup + pattern work.
+        Callers that only need one output should use the convenience wrappers
+        apply_dedup_filter() or get_repeated_patterns().
+
+        @param logs:       List of raw log-row dicts.
+        @param dedup_mode: 'none' | 'annotate' | 'skip'
+        @returns:          (deduped_logs, patterns)
+                           For 'none' mode, deduped_logs is the original list.
+        """
+        if not logs:
+            return [], []
+
+        key_fn = self._make_log_key_fn()
+        on_dup = self._make_dedup_on_duplicate(dedup_mode)
+
         result = self.grouping_algorithm.group(
             logs,
             key_fn=key_fn,
-            on_duplicate=on_duplicate,
+            on_duplicate=on_dup,
             min_match=1,
         )
-        return result.deduplicated
+
+        patterns = self._build_patterns_from_result(result, logs)
+
+        # For 'none' mode the caller wants the original list back unchanged.
+        deduped = logs if dedup_mode == 'none' else result.deduplicated
+        return deduped, patterns
+
+    # ------------------------------------------------------------------ #
+    #  Duplicate filtering (convenience wrapper)                           #
+    # ------------------------------------------------------------------ #
+
+    def apply_dedup_filter(self, logs, dedup_mode):
+        """
+        Apply duplicate filtering to a list of log rows.
+
+        Delegates to dedup_and_extract_patterns(); discards the pattern dict.
+        Fast-path for 'none' mode skips the grouping engine entirely.
+
+        @param logs:       List of log-row dicts (as returned by filter_logs).
+        @param dedup_mode: 'none' | 'annotate' | 'skip'
+        @returns: Filtered/annotated list of log-row dicts.
+        """
+        if not dedup_mode or dedup_mode == 'none':
+            return logs
+        deduped, _ = self.dedup_and_extract_patterns(logs, dedup_mode)
+        return deduped
+
+    # ------------------------------------------------------------------ #
+    #  Repeated pattern analysis (convenience wrapper)                     #
+    # ------------------------------------------------------------------ #
+
+    def get_repeated_patterns(self, logs):
+        """
+        Analyse a list of log rows and return the repeated-patterns list.
+
+        Delegates to dedup_and_extract_patterns(); discards the dedup result.
+        Patterns are sorted by (repeat_count × pattern_length) DESC.
+
+        @param logs: List of log-row dicts (raw, without prior dedup).
+        @returns: List of pattern dicts (see _build_patterns_from_result).
+        """
+        _, patterns = self.dedup_and_extract_patterns(logs, 'annotate')
+        return patterns
 
     # ------------------------------------------------------------------ #
     #  Output formatting                                                    #
