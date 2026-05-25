@@ -15,7 +15,7 @@ from .log_parser import log_parser_service
 
 # Bump this value whenever the database schema changes.
 # load_database will auto-clear any DB whose stored version differs.
-DB_SCHEMA_VERSION = 3
+DB_SCHEMA_VERSION = 4
 
 
 def compute_hash_lo_hi(device_id, component_name, message):
@@ -29,6 +29,18 @@ def compute_hash_lo_hi(device_id, component_name, message):
     hash_lo = struct.unpack_from('>q', digest, 0)[0]
     hash_hi = struct.unpack_from('>q', digest, 8)[0]
     return hash_lo, hash_hi
+
+
+def _bucket_label(unix_ts):
+    """
+    Compute time bucket label from Unix timestamp (seconds UTC).
+    Returns format: 'YYYY.MM.DD HH:00' (hourly bucket), or None if timestamp is None.
+    """
+    if unix_ts is None:
+        return None
+    import datetime
+    d = datetime.datetime.utcfromtimestamp(unix_ts)
+    return f'{d.year:04d}.{d.month:02d}.{d.day:02d} {d.hour:02d}:00'
 
 
 class _Statement:
@@ -396,6 +408,7 @@ class DatabaseService:
                 component_id INTEGER          REFERENCES components(id),
                 log_level_id INTEGER          REFERENCES log_levels(id),
                 time_bucket  INTEGER,
+                time_label   TEXT,
                 message      TEXT    NOT NULL,
                 hash_lo      INTEGER,
                 hash_hi      INTEGER
@@ -409,6 +422,7 @@ class DatabaseService:
                        c.name  AS component_name,
                        ll.name AS log_level,
                        l.time_bucket,
+                       l.time_label,
                        l.message,
                        l.hash_lo,
                        l.hash_hi
@@ -424,51 +438,102 @@ class DatabaseService:
             CREATE INDEX IF NOT EXISTS idx_component_id ON logs(component_id);
             CREATE INDEX IF NOT EXISTS idx_log_level_id ON logs(log_level_id);
             CREATE INDEX IF NOT EXISTS idx_time_bucket  ON logs(time_bucket);
+            CREATE INDEX IF NOT EXISTS idx_time_label   ON logs(time_label);
             CREATE INDEX IF NOT EXISTS idx_hash         ON logs(hash_lo, hash_hi);
             CREATE TABLE IF NOT EXISTS schema_meta (
                 key   TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
-            INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('version', '3');
+            INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('version', '4');
         """)
 
     # ------------------------------------------------------------------ #
     #  Filter options                                                       #
     # ------------------------------------------------------------------ #
 
+    def _build_logs_from(self, table_name):
+        """
+        Build the FROM clause for get_filter_options queries.
+        - If table_name == 'logs_view': query logs directly for performance
+        - Otherwise: join temp table with logs to get ID columns for GROUP BY
+        """
+        if table_name == 'logs_view':
+            return 'logs l'
+        else:
+            return f'logs l INNER JOIN (SELECT id FROM {table_name}) _f ON _f.id = l.id'
+
     def get_filter_options(self, table_name='logs_view', limited_options=True):
         """Return grouped distinct values with counts for each filter field."""
-
-        def get_opts(column, order_by, limit=None):
-            limit_clause = f' LIMIT {limit}' if limit else ''
-            sql = (f'SELECT {column}, COUNT(*) as count FROM {table_name}'
-                   f' GROUP BY {column} ORDER BY {order_by}{limit_clause}')
-            return self.db.prepare(sql).all()
-
-        total_row = self.db.prepare(f'SELECT COUNT(*) as total FROM {table_name}').get()
-        total_logs = total_row['total'] if total_row else 0
-
-        def get_time_buckets():
-            sql = f"""
-                SELECT BUCKET_LABEL(time_bucket) as time_label, COUNT(*) as count
-                FROM {table_name}
-                WHERE time_bucket IS NOT NULL
-                GROUP BY BUCKET_LABEL(time_bucket)
-                ORDER BY time_label ASC
-                LIMIT 100
-            """
-            return self.db.prepare(sql).all()
-
+        from_clause = self._build_logs_from(table_name)
         thread_limit    = 20 if limited_options else None
         component_limit = 20 if limited_options else None
 
+        def get_count_sql(limit=None):
+            limit_clause = f' LIMIT {limit}' if limit else ''
+            return limit_clause
+
+        # Total count
+        total_row = self.db.prepare(f'SELECT COUNT(*) as total FROM {from_clause}').get()
+        total_logs = total_row['total'] if total_row else 0
+
+        # Filename (NOT NULL FK)
+        filenames = self.db.prepare(f"""
+            SELECT f.filename, COUNT(*) as count
+            FROM {from_clause}
+            JOIN files f ON f.id = l.filename_id
+            GROUP BY l.filename_id ORDER BY f.filename ASC
+        """).all()
+
+        # Log level (nullable FK)
+        log_levels = self.db.prepare(f"""
+            SELECT ll.name as log_level, COUNT(*) as count
+            FROM {from_clause}
+            LEFT JOIN log_levels ll ON ll.id = l.log_level_id
+            GROUP BY l.log_level_id ORDER BY ll.name ASC
+        """).all()
+
+        # Thread (NOT NULL FK)
+        thread_limit_clause = f' LIMIT {thread_limit}' if thread_limit else ''
+        threads = self.db.prepare(f"""
+            SELECT t.name as thread_name, COUNT(*) as count
+            FROM {from_clause}
+            JOIN threads t ON t.id = l.thread_id
+            GROUP BY l.thread_id ORDER BY count DESC{thread_limit_clause}
+        """).all()
+
+        # Device (nullable FK)
+        devices = self.db.prepare(f"""
+            SELECT d.name as device_id, COUNT(*) as count
+            FROM {from_clause}
+            LEFT JOIN devices d ON d.id = l.device_id
+            GROUP BY l.device_id ORDER BY count DESC
+        """).all()
+
+        # Component (nullable FK)
+        component_limit_clause = f' LIMIT {component_limit}' if component_limit else ''
+        components = self.db.prepare(f"""
+            SELECT c.name as component_name, COUNT(*) as count
+            FROM {from_clause}
+            LEFT JOIN components c ON c.id = l.component_id
+            GROUP BY l.component_id ORDER BY count DESC{component_limit_clause}
+        """).all()
+
+        # Time buckets (pre-computed label, indexed)
+        time_buckets = self.db.prepare(f"""
+            SELECT l.time_label, COUNT(*) as count
+            FROM {from_clause}
+            WHERE l.time_label IS NOT NULL
+            GROUP BY l.time_label ORDER BY l.time_label ASC
+            LIMIT 100
+        """).all()
+
         return {
-            'filenames':   get_opts('filename',       'filename ASC'),
-            'timeBuckets': get_time_buckets(),
-            'logLevels':   get_opts('log_level',      'log_level ASC'),
-            'threads':     get_opts('thread_name',    'count DESC', thread_limit),
-            'devices':     get_opts('device_id',      'count DESC'),
-            'components':  get_opts('component_name', 'count DESC', component_limit),
+            'filenames':   filenames,
+            'timeBuckets': time_buckets,
+            'logLevels':   log_levels,
+            'threads':     threads,
+            'devices':     devices,
+            'components':  components,
             'totalLogs':   total_logs,
         }
 
@@ -486,6 +551,7 @@ class DatabaseService:
                 component_name TEXT,
                 log_level TEXT,
                 time_bucket INTEGER,
+                time_label TEXT,
                 message TEXT NOT NULL,
                 hash_lo INTEGER,
                 hash_hi INTEGER
@@ -496,8 +562,8 @@ class DatabaseService:
         return self.db.prepare("""
             INSERT INTO temp_parsed_logs
                 (filename, timestamp, thread_name, device_id, component_name,
-                 log_level, time_bucket, message, hash_lo, hash_hi)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 log_level, time_bucket, time_label, message, hash_lo, hash_hi)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """)
 
     def create_batch_insert_temp(self, insert_stmt):
@@ -506,7 +572,9 @@ class DatabaseService:
                 insert_stmt.run(
                     log['filename'], log['timestamp'], log['threadName'],
                     log.get('deviceId'), log.get('componentName'),
-                    log.get('logLevel'), log.get('timeBucket'), log['message'],
+                    log.get('logLevel'), log.get('timeBucket'),
+                    _bucket_label(log.get('timeBucket')),
+                    log['message'],
                     *compute_hash_lo_hi(
                         log.get('deviceId'), log.get('componentName'), log['message']
                     )
@@ -529,9 +597,11 @@ class DatabaseService:
             SELECT DISTINCT log_level FROM temp_parsed_logs WHERE log_level IS NOT NULL;
             INSERT INTO logs
                 (filename_id, timestamp, thread_id, device_id, component_id,
-                 log_level_id, time_bucket, message, hash_lo, hash_hi)
+                 log_level_id, time_bucket, time_label, message, hash_lo, hash_hi)
             SELECT f.id, tp.timestamp, t.id, d.id, c.id, ll.id,
-                   tp.time_bucket, tp.message, tp.hash_lo, tp.hash_hi
+                   tp.time_bucket,
+                   strftime('%Y.%m.%d %H:00', tp.time_bucket, 'unixepoch'),
+                   tp.message, tp.hash_lo, tp.hash_hi
             FROM temp_parsed_logs tp
             JOIN  files      f  ON f.filename = tp.filename
             JOIN  threads    t  ON t.name     = tp.thread_name

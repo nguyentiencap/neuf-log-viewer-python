@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\nguyentien.cap\\\\Documents\\\\Intellij\\\\neuf-log-viewer-python\" -Directory)",
+      "Bash(Select-Object Name)",
+      "Bash(pip install *)",
+      "Bash(python _test_drain3.py)",
+      "Bash(python -c \"from drain3.template_miner import TemplateMiner; import inspect; print\\(inspect.signature\\(TemplateMiner.__init__\\)\\)\")",
+      "Bash(python -c \"from drain3.template_miner_config import TemplateMinerConfig; c = TemplateMinerConfig\\(\\); print\\([attr for attr in dir\\(c\\) if not attr.startswith\\('_'\\)]\\)\")",
+      "Bash(python -c \"from drain3.masking import MaskingInstruction; import inspect; print\\(inspect.signature\\(MaskingInstruction.__init__\\)\\)\")",
+      "Bash(python -c \"from drain3.template_miner import TemplateMiner; from drain3.template_miner_config import TemplateMinerConfig; tm = TemplateMiner\\(config=TemplateMinerConfig\\(\\)\\); attrs = [a for a in dir\\(tm\\) if not a.startswith\\('_'\\)]; print\\('\\\\n'.join\\(sorted\\(attrs\\)\\)\\)\")",
+      "Bash(python -c \"from drain3.template_miner import TemplateMiner; from drain3.template_miner_config import TemplateMinerConfig; tm = TemplateMiner\\(config=TemplateMinerConfig\\(\\)\\); attrs = [a for a in dir\\(tm.drain\\) if not a.startswith\\('_'\\)]; print\\('\\\\n'.join\\(sorted\\(attrs\\)\\)\\)\")",
+      "Bash(python -c \"from drain3.template_miner import TemplateMiner; from drain3.template_miner_config import TemplateMinerConfig; tm = TemplateMiner\\(config=TemplateMinerConfig\\(\\)\\); result = tm.add_log_message\\('test message'\\); print\\(type\\(tm.drain.clusters\\)\\); print\\(hasattr\\(tm.drain.clusters, 'items'\\)\\)\")",
+      "Bash(python -c \"from drain3.template_miner import TemplateMiner; from drain3.template_miner_config import TemplateMinerConfig; tm = TemplateMiner\\(config=TemplateMinerConfig\\(\\)\\); result = tm.add_log_message\\('test message'\\); print\\(type\\(tm.drain.id_to_cluster\\)\\); print\\(hasattr\\(tm.drain.id_to_cluster, 'items'\\)\\)\")",
+      "Bash(python -c \"from drain3.template_miner import TemplateMiner; from drain3.template_miner_config import TemplateMinerConfig; tm = TemplateMiner\\(config=TemplateMinerConfig\\(\\)\\); result = tm.add_log_message\\('test message'\\); cluster = list\\(tm.drain.id_to_cluster.values\\(\\)\\)[0]; print\\([a for a in dir\\(cluster\\) if not a.startswith\\('_'\\)]\\)\")",
+      "Bash(python _test_workflow_patterns.py)",
+      "Bash(python _test_workflow_miner.py)",
+      "Bash(python _test_workflow_deep_dive.py)",
+      "Bash(python _test_workflow_improved.py)",
+      "Bash(python _test_workflow_final.py)",
+      "Bash(python neuf_log_viewer_api.py \"c:\\\\Users\\\\nguyentien.cap\\\\Documents\\\\Intellij\\\\neuf-log-viewer-python\\\\sample\")",
+      "Bash(python .\\\\neuf_log_viewer_api.py \"C:\\\\Users\\\\nguyentien.cap\\\\Downloads\\\\bug xerox\\\\DWS_MS-CS-DCE.EMEATSMFD.COM_2026-05-18 163435\")",
+      "PowerShell($body = @{\"filters\"=@{}; \"page\"=1; \"pageSize\"=10; \"inputTable\"=$null; \"dedup\"=\"annotate\"} | ConvertTo-Json; $response = Invoke-WebRequest -Uri \"http://localhost:3001/filter_log\" -Method POST -Body $body -ContentType \"application/json\" -ErrorAction SilentlyContinue; if \\($response\\) { $content = $response.Content | ConvertFrom-Json; \"SUCCESS: Got \" + @\\($content.logs\\).Count + \" logs back\" } else { \"FAILED: No response\" })",
+      "Bash(python -m py_compile src/database.py)",
+      "Bash(python -m pytest test/test_neuf_log_service.py::TestDatabaseService::test_get_filter_options_returns_available_filter_options -xvs)",
+      "Bash(python -m pytest test/test_neuf_log_service.py -k \"get_filter_options\" -xvs)",
+      "Bash(python -m pytest test/ -x)",
+      "Bash(python -m pytest test/test_neuf_log_service.py -x)",
+      "Bash(python -m pytest test/test_neuf_log_service.py::TestFilterLogsAndGetFilterOptions -xvs)",
+      "Bash(python3)",
+      "Bash(python -m pytest test/ -k \"filter\" -xvs)",
+      "Bash(python _test_mining_debug.py)"
+    ]
+  }
+}

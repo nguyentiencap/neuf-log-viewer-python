@@ -1,7 +1,7 @@
 """
 NEUF Log Service Module (Python port of src/neuf-log-service.js)
 Business logic for log operations (scan, clear, filter, get options).
-Responsibility: Core log operations — can be used by API, CLI, or any interface.
+Responsibility: Core log operations - can be used by API, CLI, or any interface.
 """
 
 import hashlib
@@ -15,6 +15,7 @@ from .log_file_scanner import LogFileScannerService
 from .database import DatabaseWrapper, DatabaseService, DB_SCHEMA_VERSION
 from .preset import PresetService
 from .repair_grouping import RePairGroupingAlgorithm
+from .workflow_grouping import WorkflowGroupingAlgorithm, WorkflowGroupingConfig
 
 
 class NEUFLogService:
@@ -46,7 +47,7 @@ class NEUFLogService:
     @staticmethod
     async def initialize_sql_js():
         """
-        In Python we use the built-in sqlite3 module — no async init needed.
+        In Python we use the built-in sqlite3 module - no async init needed.
         Returns a simple namespace that has a Database factory.
         """
         class _SQLiteNS:
@@ -77,7 +78,7 @@ class NEUFLogService:
         NEUFLogService._db_cache.pop(resolved, None)
 
     def normalize_filters(self, filters):
-        """Normalize filters object — ensure arrays, remove empty values."""
+        """Normalize filters object - ensure arrays, remove empty values."""
         array_fields = [
             'filenameInclude', 'filenameExclude',
             'logLevelInclude', 'logLevelExclude',
@@ -137,11 +138,11 @@ class NEUFLogService:
         if stored_version != DB_SCHEMA_VERSION:
             os.unlink(db_path)
             self.logger(
-                f'⚠️  Schema mismatch (stored v{stored_version}, expected v{DB_SCHEMA_VERSION}). '
+                f'[WARN] Schema mismatch (stored v{stored_version}, expected v{DB_SCHEMA_VERSION}). '
                 f'Database cleared: {db_path}'
             )
             raise Exception(
-                f'Database schema outdated (v{stored_version} → v{DB_SCHEMA_VERSION}). '
+                f'Database schema outdated (v{stored_version} -> v{DB_SCHEMA_VERSION}). '
                 f'Please re-scan logs.'
             )
 
@@ -181,7 +182,7 @@ class NEUFLogService:
         else:
             range_str = f'up to {time_to}'
         return (
-            f'⚠️  This database only contains logs {range_str}. '
+            f'[WARN] This database only contains logs {range_str}. '
             f'To include more logs, delete the database and re-scan.'
         )
 
@@ -205,7 +206,7 @@ class NEUFLogService:
         disk_conn = sqlite3.connect(db_path)
         db.db.backup(disk_conn)
         disk_conn.close()
-        self.logger(f'💾 Database saved to {db_path}')
+        self.logger(f'[OK] Database saved to {db_path}')
 
     def _get_expected_format_help_text(self):
         return (
@@ -226,13 +227,13 @@ class NEUFLogService:
         self._invalidate_folder_caches(folder_path)
         if os.path.exists(db_path):
             os.unlink(db_path)
-            self.logger(f'🗑️  Removed empty database: {db_path}')
+            self.logger(f'[INFO] Removed empty database: {db_path}')
 
     async def scan_logs(self, folder_path, scan_time_from=None, scan_time_to=None):
         """Scan NEUF-*.log files and create indexed SQLite database.
 
-        @param scan_time_from: Optional timestamp string (YYYY.MM.DD HH:mm:ss) — skip entries before
-        @param scan_time_to:   Optional timestamp string (YYYY.MM.DD HH:mm:ss) — skip entries after
+        @param scan_time_from: Optional timestamp string (YYYY.MM.DD HH:mm:ss) - skip entries before
+        @param scan_time_to:   Optional timestamp string (YYYY.MM.DD HH:mm:ss) - skip entries after
         """
         paths = self.get_db_path(folder_path)
         log_folder_path = paths['logFolderPath']
@@ -251,18 +252,18 @@ class NEUFLogService:
                 stored_version = None
 
             if stored_version == DB_SCHEMA_VERSION:
-                self.logger('⚠️  Database already exists. Skipping scan.')
+                self.logger('[WARN] Database already exists. Skipping scan.')
                 return self._create_already_scanned_result(db_path, log_folder_path)
             else:
                 self.logger(
-                    f'⚠️  Schema mismatch (stored v{stored_version}, expected v{DB_SCHEMA_VERSION}). '
+                    f'[WARN] Schema mismatch (stored v{stored_version}, expected v{DB_SCHEMA_VERSION}). '
                     f'Re-scanning: {db_path}'
                 )
                 os.unlink(db_path)
                 self._invalidate_folder_caches(folder_path)
                 # Fall through to full re-scan
 
-        self.logger('📊 Scanning and indexing logs...')
+        self.logger('[INFO] Scanning and indexing logs...')
 
         # Log scan time range if specified
         if scan_time_from or scan_time_to:
@@ -271,7 +272,7 @@ class NEUFLogService:
                 range_parts.append(f'from {scan_time_from}')
             if scan_time_to:
                 range_parts.append(f'to {scan_time_to}')
-            self.logger(f'⏰ Scan time range: {", ".join(range_parts)}')
+            self.logger(f'[INFO] Scan time range: {", ".join(range_parts)}')
 
         # Convert time range strings to unix timestamps for scanner filtering
         scan_time_from_unix = self.parser_service.get_time_bucket(scan_time_from) if scan_time_from else None
@@ -295,7 +296,7 @@ class NEUFLogService:
         db              = result['db']
         database_service = result['databaseService']
 
-        # Scan all files → temp table → main logs
+        # Scan all files -> temp table -> main logs
         database_service.init_temp_logs_table()
         insert_temp     = database_service.prepare_insert_temp()
         insert_many_temp = database_service.create_batch_insert_temp(insert_temp)
@@ -314,7 +315,7 @@ class NEUFLogService:
             self._invalidate_folder_caches(folder_path)
             if os.path.exists(db_path):
                 os.unlink(db_path)
-                self.logger(f'🗑️  Removed empty database: {db_path}')
+                self.logger(f'[INFO] Removed empty database: {db_path}')
 
             file_details = '\n'.join(
                 f"    - {s['filename']}: {s['lines']} lines, {s['entries']} entries"
@@ -331,7 +332,7 @@ class NEUFLogService:
         database_service.init_database()
         database_service.insert_from_temp_to_logs()
         database_service.drop_temp_logs_table()
-        self.logger(f'✅ Inserted {total_logs:,} entries into logs table.')
+        self.logger(f'[OK] Inserted {total_logs:,} entries into logs table.')
 
         # Save scan time range metadata so users can detect a partial-range DB
         if scan_time_from or scan_time_to:
@@ -372,7 +373,7 @@ class NEUFLogService:
             }
 
         os.unlink(db_path)
-        self.logger(f'🗑️  Database deleted: {db_path}')
+        self.logger(f'[INFO] Database deleted: {db_path}')
         return {
             'success': True,
             'message': 'Database cleared successfully.',
@@ -445,7 +446,7 @@ class NEUFLogService:
         source_table  = 'logs_view'
 
         self.logger(
-            f'🔍 Filtering logs with page: {page}, pageSize: {page_size}, '
+            f'[INFO] Filtering logs with page: {page}, pageSize: {page_size}, '
             f'sourceTable: {source_table}, filtersKey: {json.dumps(norm_filters)}'
         )
 
@@ -485,7 +486,7 @@ class NEUFLogService:
 
     async def get_preset_suggestions(self, folder_path):
         """Return all available preset suggestions."""
-        self.logger('💡 Getting preset suggestions')
+        self.logger('[INFO] Getting preset suggestions')
         paths   = self.get_db_path(folder_path)
         presets = PresetService.load_preset(paths['dbDir'], self.logger)
         client  = [
@@ -501,7 +502,7 @@ class NEUFLogService:
 
         source_table = input_table if self._is_valid_table(input_table) else 'logs_view'
         self.logger(
-            f'📋 Getting filter options, sourceTable: {source_table}, '
+            f'[INFO] Getting filter options, sourceTable: {source_table}, '
             f'limitedOptions: {limited_options}'
         )
 
@@ -525,10 +526,10 @@ class NEUFLogService:
         install_logs = [dict(r) for r in install_logs]
 
         if not install_logs:
-            self.logger('ℹ️  No LifecycleProvider install events found.')
+            self.logger('[INFO] No LifecycleProvider install events found.')
             return {}
 
-        self.logger(f'🔍 Found {len(install_logs)} LifecycleProvider install events.')
+        self.logger(f'[INFO] Found {len(install_logs)} LifecycleProvider install events.')
         return PresetService.create_install_presets(install_logs)
 
     async def create_install_preset(self, folder_path):
@@ -536,7 +537,7 @@ class NEUFLogService:
         paths = self.get_db_path(folder_path)
         cached = await self.load_database(folder_path)
 
-        self.logger('📦 Creating install presets from LifecycleProvider events...')
+        self.logger('[INFO] Creating install presets from LifecycleProvider events...')
 
         install_presets = self._generate_install_presets(cached['databaseService'])
 
@@ -546,7 +547,7 @@ class NEUFLogService:
         PresetService.save_preset(presets_path, merged, self.logger)
 
         count = len(install_presets)
-        self.logger(f'💡 Created {count} install presets.')
+        self.logger(f'[INFO] Created {count} install presets.')
         return {'success': True, 'count': count}
 
     # ------------------------------------------------------------------ #
@@ -609,7 +610,9 @@ class NEUFLogService:
         used by the export layer.
 
         Each entry has: pattern_length, repeat_count, message, device_id,
-        component_name, log_level, first_occurrence, occurrences, block_rows.
+        component_name, log_level, first_occurrence, occurrences, block_rows,
+        _key_sequence (tuple of fingerprint strings — used by post-processing
+        steps such as structural deduplication and maximality filtering).
         Sorted by (repeat_count × pattern_length) DESC.
         """
         patterns = []
@@ -632,11 +635,23 @@ class NEUFLogService:
             first_row = logs[first_row_idx] if 0 <= first_row_idx < len(logs) else {}
 
             # Raw rows for the first occurrence — caller formats them as needed.
-            block_rows = [
-                logs[first_row_idx + k]
-                for k in range(pattern_len)
-                if 0 <= first_row_idx + k < len(logs)
-            ]
+            # Shallow-copy each row so that the annotation step (which mutates
+            # item['message'] in place) cannot corrupt the block preview.
+            # For workflows, get non-contiguous block indices from result attachment
+            wf_indices = getattr(grouping_result, '_wf_first_occ_indices', None)
+            if wf_indices and entry.rule_id in wf_indices:
+                # Workflow pattern — use non-contiguous indices
+                idx_list = wf_indices[entry.rule_id]
+                block_rows = [
+                    dict(logs[i]) for i in idx_list if 0 <= i < len(logs)
+                ]
+            else:
+                # RE-PAIR pattern — use contiguous range
+                block_rows = [
+                    dict(logs[first_row_idx + k])
+                    for k in range(pattern_len)
+                    if 0 <= first_row_idx + k < len(logs)
+                ]
 
             patterns.append({
                 'rule_id':          entry.rule_id,
@@ -650,6 +665,9 @@ class NEUFLogService:
                 'occurrences':      occurrences_detail,
                 'block_rows':       block_rows,
                 'first_orig':       first_row_idx,
+                # Fingerprint tuple — preserved for post-processing (dedup, maximality filter).
+                # Prefixed with '_' to signal it is an internal field not intended for display.
+                '_key_sequence':    tuple(entry.key_sequence),
             })
 
         # Sort by total repeated lines = repeat_count × pattern_length (DESC).
@@ -658,7 +676,7 @@ class NEUFLogService:
 
     def dedup_and_extract_patterns(self, logs, dedup_mode):
         """
-        Run LZ77 grouping ONCE, returning both the deduplicated/annotated log
+        Run workflow-based grouping ONCE, returning both the deduplicated/annotated log
         list AND the repeated-patterns list.
 
         This is the single source of truth for all dedup + pattern work.
@@ -674,7 +692,10 @@ class NEUFLogService:
         key_fn = self._make_log_key_fn()
         on_dup = self._make_dedup_on_duplicate(dedup_mode)
 
-        result = self.grouping_algorithm.group(
+        # Use WorkflowGroupingAlgorithm for all deduplication
+        algo = WorkflowGroupingAlgorithm()
+
+        result = algo.group(
             logs,
             key_fn=key_fn,
             on_duplicate=on_dup,
@@ -687,36 +708,177 @@ class NEUFLogService:
         deduped = logs if dedup_mode == 'none' else result.deduplicated
 
         if dedup_mode == 'annotate':
+            annotated: list = []
+            # multi_chunk_info: combo_key -> {'chunks': chunks, 'count': int, 'first_item': item}
+            # combo_key = tuple of (sym_id, length) pairs — identifies the combined sub-pattern combo
+            multi_chunk_info: dict = {}
+
             for item in deduped:
-                if item.get('_is_annotation'):
-                    chunks = item.get('_chunks')
-                    match_len = item.get('_match_len')
-                    
+                if not item.get('_is_annotation'):
+                    annotated.append(item)
+                    continue
+
+                # Workflow annotation — uses compact description instead of pattern number
+                if item.get('_workflow_compact_desc'):
+                    compact_desc = item.pop('_workflow_compact_desc')
+                    match_len    = item.pop('_match_len', 0)
+                    start_ts     = item.pop('_wf_start_ts', '')
+                    end_ts       = item.pop('_wf_end_ts', '')
+                    item.pop('_is_annotation', None)
+                    item.pop('_chunks', None)
+                    lines_str = "1 line" if match_len == 1 else f"{match_len} lines"
+                    ts_part   = f"First seen {start_ts}" if start_ts == end_ts else f"First seen {start_ts} -> {end_ts}"
+                    pattern_part = f"Same as Pattern #{compact_desc}(Repeated {lines_str}. {ts_part})"
+
+                    # Preserve log context: keep original fields and append pattern to message
+                    timestamp = item.get('timestamp', start_ts)
+                    level = item.get('log_level', '')
+                    source = item.get('source', '')
+                    filename = item.get('filename', '')
+
+                    # Format: (filename) timestamp [level] source: original_message pattern_info
+                    prefix_parts = []
+                    if filename:
+                        prefix_parts.append(f"({filename})")
+                    if timestamp:
+                        prefix_parts.append(timestamp)
+                    if level:
+                        prefix_parts.append(f"[{level}]")
+                    if source:
+                        prefix_parts.append(source + ":")
+
+                    prefix = " ".join(prefix_parts)
+                    item['message'] = f"{prefix} {pattern_part}" if prefix else pattern_part
+                    annotated.append(item)
+                    continue
+
+                chunks    = item.get('_chunks')
+                match_len = item.get('_match_len')
+                item.pop('_is_annotation', None)
+                item.pop('_chunks', None)
+                item.pop('_match_len', None)
+
+                if len(chunks) == 1:
+                    # --- single-chunk: compact one-liner reference ---
                     sym_id, first_orig, first_len = chunks[0]
                     pattern_num = sym_id + 1
                     lines_str = "1 line" if first_len == 1 else f"{first_len} lines"
-                    base_str = f"Same as Pattern #{pattern_num} - Repeated {lines_str}"
-                    
-                    if len(chunks) > 1:
-                        extra_parts = []
-                        for sym, orig, length in chunks[1:]:
-                            extra_lines = "1 line" if length == 1 else f"{length} lines"
-                            extra_parts.append(f"Pattern #{sym + 1} ({extra_lines})")
-                        base_str += " + " + " + ".join(extra_parts)
-                    
-                    start_orig = chunks[0][1]
-                    end_orig = chunks[-1][1] + chunks[-1][2] - 1
-                    
-                    start_ts = logs[start_orig].get('timestamp', '')
+                    base_str  = f"Same as Pattern #{pattern_num} - Repeated {lines_str}"
+
+                    start_orig = first_orig
+                    end_orig   = first_orig + first_len - 1
+                    start_ts   = logs[start_orig].get('timestamp', '')
                     if match_len == 1:
                         item['message'] = f"{base_str} (First seen {start_ts})"
                     else:
                         end_ts = logs[end_orig].get('timestamp', '')
                         item['message'] = f"{base_str} (First seen {start_ts} -> {end_ts})"
-                    
-                    item.pop('_is_annotation', None)
-                    item.pop('_chunks', None)
-                    item.pop('_match_len', None)
+                    annotated.append(item)
+                else:
+                    # --- multi-chunk: emit header + inline first-seen content ---
+                    # Count occurrences so we can later adjust sub-pattern repeat counts.
+                    combo_key = tuple((sym_id, length) for sym_id, _orig, length in chunks)
+                    if combo_key not in multi_chunk_info:
+                        multi_chunk_info[combo_key] = {
+                            'chunks':     chunks,
+                            'count':      0,
+                            'first_item': item,
+                        }
+                    multi_chunk_info[combo_key]['count'] += 1
+
+                    total_lines = sum(c[2] for c in chunks)
+                    lines_str   = "1 line" if total_lines == 1 else f"{total_lines} lines"
+                    start_orig  = chunks[0][1]
+                    end_orig    = chunks[-1][1] + chunks[-1][2] - 1
+                    start_ts    = logs[start_orig].get('timestamp', '')
+                    end_ts      = logs[end_orig].get('timestamp', '')
+                    ts_str      = start_ts if (start_ts == end_ts or total_lines == 1) else f"{start_ts} -> {end_ts}"
+
+                    item['message'] = (
+                        f"Repeated {lines_str} — first seen content follows "
+                        f"({ts_str}):"
+                    )
+                    annotated.append(item)
+
+                    # Inject the original first-seen rows from every chunk inline
+                    for _sym, chunk_orig, chunk_len in chunks:
+                        for k in range(chunk_len):
+                            row_idx = chunk_orig + k
+                            if 0 <= row_idx < len(logs):
+                                annotated.append(dict(logs[row_idx]))
+
+            deduped = annotated
+
+            # ----------------------------------------------------------------
+            # Adjust pattern repeat counts for multi-chunk combos:
+            #
+            # When patterns A and B fired together N times as a combined block,
+            # those N joint occurrences are already represented in each pattern's
+            # own repeat_count.  We create one combined pattern entry and deduct
+            # N from each constituent pattern so the counts stay correct.
+            # ----------------------------------------------------------------
+            if multi_chunk_info:
+                # Build a rule_id → pattern index lookup for fast mutation
+                rule_id_to_idx = {p['rule_id']: i for i, p in enumerate(patterns)}
+
+                for combo_key, info in multi_chunk_info.items():
+                    n         = info['count']
+                    chunks    = info['chunks']
+                    first_row = info['first_item']
+
+                    # Deduct N from each constituent sub-pattern
+                    for sym_id, first_orig, length in chunks:
+                        pidx = rule_id_to_idx.get(sym_id)
+                        if pidx is not None:
+                            patterns[pidx]['repeat_count'] = max(0, patterns[pidx]['repeat_count'] - n)
+
+                    # Build a new combined pattern entry
+                    total_lines = sum(c[2] for c in chunks)
+                    part_labels = []
+                    combined_block_rows = []
+                    combined_key_seq    = []
+                    for sym_id, first_orig, length in chunks:
+                        part_labels.append(f"#{sym_id + 1}({length}L)")
+                        for k in range(length):
+                            row_idx = first_orig + k
+                            if 0 <= row_idx < len(logs):
+                                combined_block_rows.append(dict(logs[row_idx]))
+                                # Reuse the key_sequence from the sub-pattern if available
+                                pidx = rule_id_to_idx.get(sym_id)
+                                if pidx is not None:
+                                    ks = list(patterns[pidx].get('_key_sequence', ()))
+                                    if ks and len(ks) == length:
+                                        combined_key_seq.extend(ks)
+                                    else:
+                                        combined_key_seq.append(f'__combo_{sym_id}_{k}')
+                                else:
+                                    combined_key_seq.append(f'__combo_{sym_id}_{k}')
+
+                    start_orig = chunks[0][1]
+                    start_ts   = logs[start_orig].get('timestamp', '') if 0 <= start_orig < len(logs) else ''
+                    combo_label = '+'.join(part_labels)
+
+                    new_pattern = {
+                        'rule_id':          -1,   # synthetic — not a RE-PAIR rule
+                        'pattern_length':   total_lines,
+                        'repeat_count':     n,
+                        'message':          first_row.get('message', f'Combined pattern {combo_label}'),
+                        'device_id':        first_row.get('device_id'),
+                        'component_name':   first_row.get('component_name'),
+                        'log_level':        first_row.get('log_level'),
+                        'first_occurrence': start_ts,
+                        'occurrences':      [{'line': -1, 'timestamp': start_ts}],
+                        'block_rows':       combined_block_rows,
+                        'first_orig':       start_orig,
+                        '_key_sequence':    tuple(combined_key_seq),
+                        '_is_combined':     True,
+                        '_combo_label':     combo_label,
+                    }
+                    patterns.append(new_pattern)
+
+                # Re-sort: discard zero-repeat patterns, then sort by wasted lines DESC
+                patterns = [p for p in patterns if p['repeat_count'] > 0]
+                patterns.sort(key=lambda p: p['repeat_count'] * p['pattern_length'], reverse=True)
 
         return deduped, patterns
 
